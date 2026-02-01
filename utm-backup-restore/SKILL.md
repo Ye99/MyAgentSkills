@@ -66,14 +66,6 @@ Use `ditto` for zip creation. Prefer to use the helper script in this skill:
 zsh scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
 ```
 
-Raw `ditto` form:
-
-```bash
-ditto -c -k --sequesterRsrc --keepParent \
-   "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.utm" \
-   "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip"
-```
-
 ## Restore a zip backup
 Restores into the default UTM Documents folder:
 
@@ -82,16 +74,6 @@ Prefer to use the helper script in this skill:
 ```bash
 zsh scripts/restoreutm.sh \
    "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip"
-```
-
-Raw `ditto` form:
-
-```bash
-restore_dir="$HOME/Library/Containers/com.utmapp.UTM/Data/Documents"
-mkdir -p "$restore_dir"
-
-ditto -x -k "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip" \
-   "$restore_dir"
 ```
 
 ## Restore a `.utm`
