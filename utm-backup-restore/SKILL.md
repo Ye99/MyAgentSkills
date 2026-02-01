@@ -7,12 +7,14 @@ compatibility: opencode
 
 # UTM VM Backup/Restore (macOS)
 
+> **Note:** This skill and its scripts are strictly for macOS. They rely on `ditto` to preserve bundle metadata.
+
 ## Purpose
 Back up and restore UTM `.utm` bundles with full macOS bundle fidelity.
 
 This skill intentionally covers backup/restore only (no crash recovery).
 
-## Safety rules (must follow)
+## Safety rules
 - Only back up when VM is fully shut down (not running, not suspended).
 - Prefer quitting UTM before copying/restoring.
 - Always copy entire `.utm` bundle (config + disk images).
@@ -41,7 +43,7 @@ Before executing any backup/restore operation, ask the user to confirm:
 
 **Important**: If the user doesn't provide values, use the defaults shown above.
 
-## Back up a VM (recommended)
+## Back up a VM
 One-off timestamped backup:
 
 ```bash
@@ -58,11 +60,11 @@ Notes:
 - Replace `<InfoTag>` with a short descriptor.
 - Renaming the resulting `.utm` is fine as long as the VM is shut down.
 
-## Zip backups (preserve bundle metadata)
+## Zip backups
 Use `ditto` for zip creation. Prefer to use the helper script in this skill:
 
 ```bash
-zsh .claude/skills/utm-backup-restore/scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
+zsh scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
 ```
 
 Raw `ditto` form:
@@ -79,7 +81,7 @@ Restores into the default UTM Documents folder:
 Prefer to use the helper script in this skill:
 
 ```bash
-zsh .claude/skills/utm-backup-restore/scripts/restoreutm.sh \
+zsh scripts/restoreutm.sh \
    "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip"
 ```
 
@@ -93,27 +95,11 @@ ditto -x -k "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip" \
    "$restore_dir"
 ```
 
-## Restore a `.utm` (no zip)
+## Restore a `.utm`
 ```bash
 ditto "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.utm" \
        "$HOME/Library/Containers/com.utmapp.UTM/Data/Documents/"
 ```
 
-## Safe clone workflow (manual)
-1. Shut down the VM.
-2. Quit UTM.
-3. Copy the `.utm` bundle to your backup location.
-4. Open UTM and use Open to test the copy.
-
-## Helper scripts (optional)
-This skill ships helper scripts:
-
-- `.claude/skills/utm-backup-restore/scripts/zipnewutm.sh` creates `.zip` backups with `ditto`.
-- `.claude/skills/utm-backup-restore/scripts/restoreutm.sh` restores a `.zip` into the default UTM folder.
-
-Run `--help` for options:
-
-```bash
-zsh .claude/skills/utm-backup-restore/scripts/zipnewutm.sh --help
-zsh .claude/skills/utm-backup-restore/scripts/restoreutm.sh --help
-```
+## Helper scripts
+Run `--help` for options on bundled scripts (`scripts/zipnewutm.sh`, `scripts/restoreutm.sh`).

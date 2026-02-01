@@ -1,6 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "Error: This script requires macOS (Darwin)." >&2
+  exit 1
+fi
+
 usage() {
   cat <<'EOF'
 Usage:
