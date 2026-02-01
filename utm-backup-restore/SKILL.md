@@ -2,7 +2,6 @@
 name: utm-backup-restore
 description: Back up and restore UTM VM bundles with full macOS bundle metadata
 license: MIT
-compatibility: opencode
 ---
 
 # UTM VM Backup/Restore (macOS)
