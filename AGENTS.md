@@ -1,5 +1,6 @@
-## Engineering principle:
-'Things should be as simple as possible and no simpler.'
+## Engineering principle
+
+Things should be as simple as possible, and no simpler.
 
 ## Authoring README Policy (Global)
 
@@ -15,7 +16,7 @@ Do NOT update README for trivial changes:
 - typo-only fixes
 - internal test-only changes
 
-Write documentation with the Engineering principles; Keep edits minimal, precise, and user-relevant.
+Apply the engineering principle above, keep edits minimal, precise, and user-relevant.
 
 ## Git Linear History Policy (Global)
 
