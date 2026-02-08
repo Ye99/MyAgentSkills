@@ -2,7 +2,7 @@
 
 Things should be as simple as possible, and no simpler.
 
-## Authoring README Policy (Global)
+## Authoring README Policy
 
 When modifying a repository, if `README.md` exists, update it only when the change materially affects users or contributors:
 - setup/install/run steps
@@ -18,7 +18,7 @@ Do NOT update README for trivial changes:
 
 Apply the engineering principle above, keep edits minimal, precise, and user-relevant.
 
-## Git Linear History Policy (Global)
+## Git Linear History Policy
 
 When pushing branches, prefer a linear history.
 
