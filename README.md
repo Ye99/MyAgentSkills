@@ -7,12 +7,12 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **markdown-topic-normalizer** ([`markdown-topic-normalizer/SKILL.md`](markdown-topic-normalizer/SKILL.md)): Normalize escaped topic markers into proper Markdown headings while preserving code fences and real lists.
 - **utm-backup-restore** ([`utm-backup-restore/SKILL.md`](utm-backup-restore/SKILL.md)): Back up and restore UTM VM bundles with full macOS bundle metadata.
 
-## Usage
-These are standard Ask your AI agent.
-## Repository Notes
+## AI agent rules
 
-- AI agent operating rules for this repo: `AGENTS.md`
+- **[AGENTS.md](AGENTS.md)**: Best practice rules.
+
+## Usage
+These are standards. Your AI agent knows how to use them. :-)
 
 ## License
-
 MIT (see `LICENSE`).
