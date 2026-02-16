@@ -22,39 +22,46 @@ To use Google models with OpenCode, you must enable the Gemini API in your Googl
    - Read `~/.config/opencode/opencode.json`.
    - Parse the JSON and inspect the `provider.google` key.
 
-2. **Identify Models to Add/Update**:
-   - The user will provide a JSON snippet with model definitions.
+2. **Fetch Latest Reference Configuration**:
+   - Read the latest configuration from [GitHub](https://github.com/shekohex/opencode-google-antigravity-auth?tab=readme-ov-file#example-opencode-config-with-providermodels).
+   - Extract the JSON configuration block from the content. This is the **source of truth** for model definitions.
+
+3. **Identify Models to Add/Update**:
+   - Use the models defined in the fetched JSON under `provider.google.models`.
    - Each model lives under `provider.google.models.<model-id>`.
    - Common fields per model: `id`, `name`, `reasoning`, `release_date`, `limit` (`context`, `output`), `cost` (`input`, `output`, `cache_read`), `modalities`, and `variants` (thinking-level presets).
 
-3. **Merge Strategy**:
+4. **Merge Strategy**:
    - If `provider.google` does not exist, create it with `"npm": "@ai-sdk/google"` and an empty `models` object first.
-   - For each model the user provides:
-     - If the model key already exists, **replace** its entire value with the new definition.
+   - **Merge** the model definitions from the **fetched JSON configuration**.
+   - **IMPORTANT**: Skip the `release_date` field for all models during the merge.
+   - For each model:
+     - If the model key already exists, **merge** the new definition (excluding `release_date`).
      - If the model key does not exist, **add** it.
-   - Do **not** remove existing models the user did not mention.
+   - Do **not** remove existing models.
 
-4. **Write Back**:
+5. **Write Back**:
    - Write the updated JSON back to `~/.config/opencode/opencode.json`, pretty-printed with 2-space indent.
    - Validate the JSON is syntactically correct before writing.
 
-5. **Verify**:
+6. **Verify**:
    - Re-read the file and confirm the new models appear under `provider.google.models`.
    - Report which models were added or updated.
 
 ## Reference: Current Google Provider Block
 
-The canonical Google provider structure looks like this (more info at https://github.com/shekohex/opencode-google-antigravity-auth?tab=readme-ov-file#examples)
+The canonical Google provider structure based on [this example](https://github.com/shekohex/opencode-google-antigravity-auth?tab=readme-ov-file#example-opencode-config-with-providermodels):
 
 ```json
 {
+  "plugin": ["opencode-google-antigravity-auth"],
   "provider": {
     "google": {
       "npm": "@ai-sdk/google",
       "models": {
-        "<model-id>": {
-          "id": "<model-id>",
-          "name": "Human-Readable Name",
+        "gemini-3-pro-preview": {
+          "id": "gemini-3-pro-preview",
+          "name": "Gemini 3 Pro",
           "reasoning": true,
           "limit": { "context": 1000000, "output": 64000 },
           "cost": { "input": 2, "output": 12, "cache_read": 0.2 },
@@ -62,15 +69,10 @@ The canonical Google provider structure looks like this (more info at https://gi
             "input": ["text", "image", "video", "audio", "pdf"],
             "output": ["text"]
           },
-          "variants": {
-            "low": {
-              "options": {
-                "thinkingConfig": {
-                  "thinkingLevel": "low",
-                  "includeThoughts": true
-                }
-              }
-            }
+          "variants": { 
+             "low": { ... },
+             "medium": { ... },
+             "high": { ... }
           }
         }
       }
