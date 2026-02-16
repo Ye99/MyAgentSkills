@@ -10,6 +10,12 @@ This skill adds or updates Google AI model definitions in the OpenCode configura
 
 Trigger this skill when the user asks to "add Google models to opencode" or similar.
 
+## Prerequisites
+
+To use Google models with OpenCode, you must enable the Gemini API in your Google Cloud project:
+1. Go to [Google Cloud Console API Library](https://console.cloud.google.com/apis/library).
+2. Search for **Gemini for Google Cloud API** (`cloudaicompanion.googleapis.com`) and click **Enable**.
+
 ## Steps
 
 1. **Read Current Config**:
