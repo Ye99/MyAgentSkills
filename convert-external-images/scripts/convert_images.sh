@@ -27,20 +27,19 @@ DESCRIPTION:
     the end of the file for readability.
 
 EXAMPLES:
-    # Convert images and prompt for deletion
+    # Convert images and delete originals
     ./convert_images.sh ~/notes/document.md
 
     # Convert images but keep originals
     ./convert_images.sh ~/notes/document.md --no-delete
 
 PROCESS:
-    1. Creates backup (.backup file)
-    2. Finds Obsidian-style image references
-    3. Converts images to base64
-    4. Updates markdown with reference-style links
-    5. Places base64 definitions at end of file
-    6. Verifies conversion
-    7. Optionally deletes original files
+    1. Finds Obsidian-style image references
+    2. Converts images to base64
+    3. Updates markdown with reference-style links
+    4. Places base64 definitions at end of file
+    5. Verifies conversion
+    6. Deletes original files (unless --no-delete is used)
 
 OUTPUT FORMAT:
     Main text:       ![Description][embedded-image-1]
@@ -63,10 +62,6 @@ if [ ! -f "$MARKDOWN_FILE" ]; then
 fi
 
 echo "Converting external images to embedded base64 in: $MARKDOWN_FILE"
-
-# Create backup
-cp "$MARKDOWN_FILE" "${MARKDOWN_FILE}.backup"
-echo "✓ Backup created: ${MARKDOWN_FILE}.backup"
 
 # Python script to do the conversion
 python3 << 'PYEOF'
@@ -187,14 +182,9 @@ if [ "$NO_DELETE" = true ]; then
     exit 0
 fi
 
-# Ask for confirmation before deleting original files
 echo ""
-echo "Conversion complete! The following files can now be deleted:"
-cat "${MARKDOWN_FILE}.converted_files"
-echo ""
-read -p "Delete these original image files? (yes/no): " confirm
-
-if [ "$confirm" = "yes" ]; then
+echo "Conversion complete! Deleting original files..."
+if [ -f "${MARKDOWN_FILE}.converted_files" ]; then
     while IFS= read -r filepath; do
         if [ -f "$filepath" ]; then
             rm "$filepath"
@@ -204,8 +194,8 @@ if [ "$confirm" = "yes" ]; then
     rm "${MARKDOWN_FILE}.converted_files"
     echo "✅ All original image files deleted"
 else
-    echo "Original files kept. List saved in: ${MARKDOWN_FILE}.converted_files"
+    echo "No files to delete."
 fi
 
 echo ""
-echo "Done! Backup available at: ${MARKDOWN_FILE}.backup"
+echo "Done!"
