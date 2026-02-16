@@ -5,6 +5,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 
 - **add-google-models-to-opencode** ([`add-google-models-to-opencode/SKILL.md`](add-google-models-to-opencode/SKILL.md)): Add or update Google provider models in the opencode.json configuration.
 - **convert-external-images** ([`convert-external-images/SKILL.md`](convert-external-images/SKILL.md)): Convert external image files in Obsidian markdown to embedded base64 data URLs with clean reference-style syntax.
+- **create-mcp-ext-apps** ([`create_mcp_ext_apps/SKILL.md`](create_mcp_ext_apps/SKILL.md)): Build MCP ext-apps using a reference architecture with reusable transport, registration, and UI runtime patterns.
 - **format-markdownfile-code-block** ([`format-markdownfile-code-block/SKILL.md`](format-markdownfile-code-block/SKILL.md)): Normalize Markdown notes so command/code lines are easy to read.
 - **link-opencode-skill** ([`link-opencode-skill/SKILL.md`](link-opencode-skill/SKILL.md)): Install local directories as OpenCode skills by creating symbolic links in `~/.config/opencode/skills/`.
 - **markdown-topic-normalizer** ([`markdown-topic-normalizer/SKILL.md`](markdown-topic-normalizer/SKILL.md)): Normalize escaped topic markers into proper Markdown headings while preserving code fences and real lists.
