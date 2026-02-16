@@ -1,6 +1,6 @@
 ---
 name: convert-external-images
-description: Convert external image files (Obsidian-style ![[image.png]] or standard ![](image.png)) to embedded base64 data URLs in markdown. Uses reference-style syntax for clean main text with base64 data at file end. Supports PNG, JPG, JPEG, GIF, WEBP. Includes backup, verification, and optional cleanup of original files.
+description: Convert external image files (Obsidian-style ![[image.png]] or standard ![](image.png)) to embedded base64 data URLs in markdown. Uses reference-style syntax for clean main text with base64 data at file end. Supports PNG, JPG, JPEG, GIF, WEBP. Includes verification, and deletion of original files (default).
 ---
 
 # Convert External Images to Embedded Base64
@@ -23,12 +23,11 @@ cd /home/ye/p/MyAgentSkills/convert-external-images/scripts
 
 ## Process Overview
 
-1. **Backup** - Creates `.backup` file before changes
-2. **Detection** - Finds Obsidian-style `![[image.png]]` references
-3. **Conversion** - Converts images to base64, uses reference-style syntax
-4. **Placement** - Puts base64 definitions at end of file for readability
-5. **Verification** - Confirms all conversions succeeded
-6. **Cleanup** - Optional deletion of original image files (with confirmation)
+1. **Detection** - Finds Obsidian-style `![[image.png]]` references
+2. **Conversion** - Converts images to base64, uses reference-style syntax
+3. **Placement** - Puts base64 definitions at end of file for readability
+4. **Verification** - Confirms all conversions succeeded
+5. **Cleanup** - Deletion of original image files (default, use --no-delete to skip)
 
 ## Output Format
 
@@ -47,9 +46,8 @@ cd /home/ye/p/MyAgentSkills/convert-external-images/scripts
 - ✓ Automatic MIME type detection (png, jpg, jpeg, gif, webp)
 - ✓ Reference-style syntax keeps main text clean
 - ✓ Base64 data at file end for readability
-- ✓ Backup creation before modifications
 - ✓ Verification step ensures success
-- ✓ Safe deletion with user confirmation
+- ✓ Deletes original files by default (skip with --no-delete)
 - ✓ Handles missing image files gracefully
 - ✓ Obsidian-compatible reference syntax
 
