@@ -31,5 +31,11 @@ When pushing branches, prefer a linear history.
 When searching or reading markdown files:
 - Do not read whole file if they are large.
 - Read smartly using tools (grep/search first).
-- Skip embedded image data (base64) in .md files to save context.
+
+## Markdown/Obsidian Linking Policy
+
+When creating internal links to headers (e.g., `[[#Header Name]]`):
+- **Keep headers clean**: Do not include links or markdown formatting inside the header itself (e.g., use `### Header` instead of `### [Header](url)`).
+- **Place links in content**: Put external links in the body text immediately following the header.
+- **Reason**: Links inside headers break the anchor generation for internal linking in Obsidian and many markdown parsers.
 
