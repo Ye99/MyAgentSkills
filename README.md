@@ -10,6 +10,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **link-opencode-skill** ([`link-opencode-skill/SKILL.md`](link-opencode-skill/SKILL.md)): Install local directories as OpenCode skills by creating symbolic links in `~/.config/opencode/skills/`.
 - **markdown-obsidian-linker** ([`markdown-obsidian-linker/SKILL.md`](markdown-obsidian-linker/SKILL.md)): Enforce Obsidian-safe markdown headings so internal links like `[[#Header]]` resolve reliably.
 - **markdown-topic-normalizer** ([`markdown-topic-normalizer/SKILL.md`](markdown-topic-normalizer/SKILL.md)): Normalize escaped topic markers into proper Markdown headings while preserving code fences and real lists.
+- **opencode-clipboard-image** ([`opencode-clipboard-image/SKILL.md`](opencode-clipboard-image/SKILL.md)): Save clipboard images to timestamped files and return OpenCode-ready `@path` references.
 - **utm-backup-restore** ([`utm-backup-restore/SKILL.md`](utm-backup-restore/SKILL.md)): Back up and restore UTM VM bundles with full macOS bundle metadata.
 
 ## AI agent rules
