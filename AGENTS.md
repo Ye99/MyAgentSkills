@@ -22,5 +22,14 @@ Apply the engineering principle above, keep edits minimal, precise, and user-rel
 
 When pushing branches, prefer a linear history.
 
+- Stage and commit local changes with a descriptive message before running `git pull --rebase`.
 - Before any `git push`, run `git pull --rebase` so remote changes are applied on top of the local branch.
 - Do not use merge-based pulls (avoid merge commits). Prefer rebase to keep history linear.
+
+## Search Protocol for .md Files
+
+When searching or reading markdown files:
+- Do not read whole file if they are large.
+- Read smartly using tools (grep/search first).
+- Skip embedded image data (base64) in .md files to save context.
+
