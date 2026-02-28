@@ -26,9 +26,17 @@ When pushing branches, prefer a linear history.
 - Before any `git push`, run `git pull --rebase` so remote changes are applied on top of the local branch.
 - Do not use merge-based pulls (avoid merge commits). Prefer rebase to keep history linear.
 
+## Git Co-Author Policy
+
+When a repository is configured with local co-author settings, preserve them on agent-made commits.
+
+- Before committing, check `git config --local --get commit.template`.
+- If a local template exists and contains `Co-authored-by:` trailers, keep those trailers in the final commit message.
+- If committing non-interactively (for example with `git commit -m`), append the same `Co-authored-by:` lines explicitly.
+- Do not invent or replace co-author emails; use the values defined by the repository template.
+
 ## Search Protocol for .md Files
 
 When searching or reading markdown files:
 - Do not read whole file if they are large.
 - Read smartly using tools (grep/search first).
-
