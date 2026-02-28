@@ -32,7 +32,8 @@ When a repository is configured with local co-author settings, preserve them on 
 
 - Before committing, check `git config --local --get commit.template`.
 - If a local template exists and contains `Co-authored-by:` trailers, keep those trailers in the final commit message.
-- If committing non-interactively (for example with `git commit -m`), append the same `Co-authored-by:` lines explicitly.
+- If committing non-interactively (for example with `git commit -m`), append the same `Co-authored-by:` lines explicitly as one contiguous trailer block at the end of the message (no blank lines between trailer lines).
+- After committing, verify trailer parsing with `git show -s --format=%B HEAD | git interpret-trailers --parse` and confirm all expected `Co-authored-by:` entries are present.
 - Do not invent or replace co-author emails; use the values defined by the repository template.
 
 ## Search Protocol for .md Files

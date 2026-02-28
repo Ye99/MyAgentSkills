@@ -31,7 +31,8 @@ Do not use this skill when the user asks for global `~/.gitconfig` setup across 
 1. Run the helper script in this skill to generate `.gitmessage` and set repo-local `commit.template`.
 2. Verify `git config --show-origin --get commit.template` points to `<repo>/.gitmessage`.
 3. Confirm `.gitmessage` has three uncommented `Co-authored-by` lines.
-4. Remind the user to commit with `git commit` (not `git commit -m`) so the template is loaded.
+4. Prefer `git commit` (not `git commit -m`) so the template is loaded automatically.
+5. If using `git commit -m`, require all `Co-authored-by:` lines to be a single contiguous trailer block at the end of the message.
 
 ## Helper Script
 
@@ -61,6 +62,7 @@ bash scripts/setup-repo-coauthors.sh ~/p/some-repo opencode-bot claude openai
   - `Co-authored-by: Claude <id+username@users.noreply.github.com>`
   - `Co-authored-by: Codex <id+username@users.noreply.github.com>`
 - No guessed IDs and no placeholder emails.
+- `git -C <repo> show -s --format=%B HEAD | git interpret-trailers --parse` returns all expected `Co-authored-by` lines.
 
 ## Common Mistakes
 
@@ -71,4 +73,5 @@ bash scripts/setup-repo-coauthors.sh ~/p/some-repo opencode-bot claude openai
 | Using repo path as username (for example `openai/codex`) | Use the repo owner login (`openai`) |
 | Commenting out co-author lines with `#` | Keep `Co-authored-by` trailers uncommented |
 | Setting global template accidentally | Use `git config --local commit.template ...` |
-| Using `git commit -m` | Use `git commit` so template is inserted |
+| Using `git commit -m` | Prefer `git commit`; if `-m` is required, keep all `Co-authored-by` lines contiguous at message end |
+| Using multiple `-m` flags that separate trailer lines with blank lines | Put all `Co-authored-by` lines together in one final message block |
