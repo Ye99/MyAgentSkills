@@ -1,7 +1,6 @@
 ---
 name: jetson-ollama-upgrade
 description: Upgrade Ollama on Jetson Orin/Nano with jetson-containers, build CUDA-enabled image, and verify newer model pull support.
-license: MIT
 ---
 
 # Jetson Ollama Upgrade

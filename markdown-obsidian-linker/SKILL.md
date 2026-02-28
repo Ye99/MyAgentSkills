@@ -1,6 +1,6 @@
 ---
 name: markdown-obsidian-linker
-description: (opencode - Skill) Enforces clean markdown headers for Obsidian compatibility. Recursively processes directories to ensure internal links like `[[#Header]]` work by stripping links from headers and moving them to the body. Use when writing, editing, or auditing markdown files and directories that will be used in Obsidian or require internal linking compatibility.
+description: Use when writing, editing, or auditing markdown for Obsidian where internal links like `[[#Header]]` must work reliably.
 ---
 
 # Markdown Obsidian Linker
@@ -11,7 +11,7 @@ This skill enforces clean markdown headers to ensure compatibility with Obsidian
 
 When writing or auditing markdown content:
 
-1.  **Scan directories recursively**: When a directory path is provided, use the `glob` tool with the pattern `**/*.md` (or the `find` command) to locate all markdown files within the target folder and its subdirectories.
+1.  **Scan directories recursively**: When a directory path is provided, use the `glob` tool with the pattern `**/*.md` to locate all markdown files within the target folder and its subdirectories.
 
 2.  **Keep headers clean**: Do not include links or markdown formatting inside the header itself.
     *   **Bad**: `### [Header](url)`

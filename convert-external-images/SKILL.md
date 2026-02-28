@@ -1,6 +1,6 @@
 ---
 name: convert-external-images
-description: Convert external image files (Obsidian-style ![[image.png]] or standard ![](image.png)) to embedded base64 data URLs in markdown. Uses reference-style syntax for clean main text with base64 data at file end. Supports PNG, JPG, JPEG, GIF, WEBP. Includes verification, and deletion of original files (default).
+description: Convert external image files (Obsidian-style ![[image.png]] or standard ![](image.png)) to embedded base64 data URLs in markdown. Uses reference-style syntax for clean main text with base64 data at file end. Supports PNG, JPG, JPEG, GIF, WEBP. Includes verification and deletion of original files (default).
 ---
 
 # Convert External Images to Embedded Base64
@@ -17,17 +17,16 @@ Convert external image files referenced in markdown to embedded base64 data URLs
 ## Quick Start
 
 ```bash
-cd /home/ye/p/MyAgentSkills/convert-external-images/scripts
-./convert_images.sh /path/to/markdown/file.md
+bash scripts/convert_images.sh /path/to/markdown/file.md
 ```
 
 ## Process Overview
 
-1. **Detection** - Finds Obsidian-style `![[image.png]]` references
-2. **Conversion** - Converts images to base64, uses reference-style syntax
+1. **Detection** - Finds Obsidian-style `![[image.png]]` and standard markdown `![](image.png)` references
+2. **Conversion** - Converts images to base64 using reference-style syntax
 3. **Placement** - Puts base64 definitions at end of file for readability
 4. **Verification** - Confirms all conversions succeeded
-5. **Cleanup** - Deletion of original image files (default, use --no-delete to skip)
+5. **Cleanup** - Deletes original image files by default (use --no-delete to skip)
 
 ## Output Format
 
@@ -71,8 +70,7 @@ Makes text unreadable with giant base64 strings.
 
 ## Technical Details
 
-- Uses `base64 -w 0` for single-line encoding
-- Python script handles file I/O and regex replacements
-- Sanitizes filenames to create clean reference IDs
-- Preserves original file permissions
+- Python script handles base64 encoding, file I/O, and regex replacements
+- Uses sequential `embedded-image-N` reference IDs to avoid collisions
+- Rewrites markdown content with updated image references and appended data URLs
 - Cross-platform compatible (Linux/macOS)

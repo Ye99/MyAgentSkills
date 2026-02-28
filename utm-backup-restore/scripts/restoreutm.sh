@@ -1,11 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
 
-if [[ "$(uname)" != "Darwin" ]]; then
-  echo "Error: This script requires macOS (Darwin)." >&2
-  exit 1
-fi
-
 usage() {
   cat <<'EOF'
 Usage:
@@ -28,6 +23,16 @@ Notes:
 EOF
 }
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "Error: This script requires macOS (Darwin)." >&2
+  exit 1
+fi
+
 if [ "$#" -eq 0 ]; then
   usage >&2
   exit 2
@@ -45,7 +50,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --restore-dir)
       restore_dir="${2:-}"
-      if [ -z "$restore_dir" ]; then
+      if [ -z "$restore_dir" ] || [[ "$restore_dir" == --* ]]; then
         echo "--restore-dir requires a PATH" >&2
         exit 2
       fi
@@ -94,4 +99,4 @@ mkdir -p "$restore_dir"
 # Use ditto for extraction to preserve macOS bundle metadata.
 ditto -x -k "$zip_path" "$restore_dir"
 
-echo "restored to $restore_dir"
+echo "Restored to $restore_dir"

@@ -7,17 +7,17 @@ description: Save clipboard images to a timestamped file and return a ready-to-p
 
 ## Purpose
 
-Automate the common flow where image paste into terminal chat does not work: extract image data from clipboard, save it to a file, and provide a path the user can reference in OpenCode.
+Automate the common flow where pasting an image into terminal chat does not work: extract image data from the clipboard, save it to a file, and provide a path the user can reference in OpenCode.
 
 ## When To Use
 
 - User says image paste is not working in OpenCode/TUI.
-- User asks to "paste screenshot" into OpenCode from clipboard.
-- User wants a one-step workflow to save clipboard image and attach by path.
+- User asks to "paste a screenshot" into OpenCode from clipboard.
+- User wants a one-step workflow to save a clipboard image and attach it by path.
 
 ## Expected Outcome
 
-1. Clipboard image is saved to `~/Pictures/opencode/clip-YYYYmmdd-HHMMSS.<ext>`.
+1. Clipboard image is saved to `~/Pictures/opencode/clip-YYYYMMDD-HHMMSS.<ext>`.
 2. Agent returns the absolute file path.
 3. Agent gives the exact message pattern to use in OpenCode (for example: `@/home/user/Pictures/opencode/clip-....png`).
 
@@ -33,7 +33,7 @@ echo "${XDG_SESSION_TYPE:-unknown}"
 - X11: prefer `xclip`.
 - Wayland: prefer `wl-paste` (package `wl-clipboard`).
 
-3. If missing, instruct installation command for detected distro, then continue.
+3. If missing, provide the installation command for the detected distro, then continue.
 
 4. Save clipboard image into a stable directory:
 
@@ -50,6 +50,10 @@ mkdir -p "$HOME/Pictures/opencode"
 ```bash
 mkdir -p "$HOME/Pictures/opencode"
 mime="$(xclip -selection clipboard -t TARGETS -o | tr ' ' '\n' | grep '^image/' | head -n1)"
+if [ -z "$mime" ]; then
+  echo "Clipboard does not currently contain an image. Copy an image first, then retry." >&2
+  exit 1
+fi
 case "$mime" in
   image/png) ext="png" ;;
   image/jpeg) ext="jpg" ;;
@@ -66,6 +70,10 @@ xclip -selection clipboard -t "$mime" -o > "$f" && printf '%s\n' "$f"
 ```bash
 mkdir -p "$HOME/Pictures/opencode"
 mime="$(wl-paste --list-types | grep '^image/' | head -n1)"
+if [ -z "$mime" ]; then
+  echo "Clipboard does not currently contain an image. Copy an image first, then retry." >&2
+  exit 1
+fi
 case "$mime" in
   image/png) ext="png" ;;
   image/jpeg) ext="jpg" ;;
@@ -91,7 +99,7 @@ After saving successfully, respond with:
 - Saved: `<absolute_path>`
 - Use in OpenCode: `@<absolute_path>`
 
-If clipboard has no image MIME type, respond with:
+If the clipboard has no image MIME type, respond with:
 
 - "Clipboard does not currently contain an image. Copy an image first, then retry."
 

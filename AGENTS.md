@@ -38,5 +38,5 @@ When a repository is configured with local co-author settings, preserve them on 
 ## Search Protocol for .md Files
 
 When searching or reading markdown files:
-- Do not read whole file if they are large.
+- Do not read whole files if they are large.
 - Read smartly using tools (grep/search first).

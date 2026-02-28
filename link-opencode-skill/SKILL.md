@@ -1,9 +1,14 @@
+---
+name: link-opencode-skill
+description: Use when a user wants to install or link local skills into OpenCode, either as a whole folder symlink or per-skill symlinks.
+---
+
 # Link OpenCode Skill
 
-This skill allows you to "install" or "link" skills to OpenCode, making them available for use by the agent. It supports two linking strategies — **whole folder** or **individual skill** — and should present both options to the user with their tradeoffs.
+This skill allows you to "install" or "link" skills to OpenCode, making them available for use by the agent. It supports two linking strategies — **whole folder** or **individual skill** — and should present both options to the user with their trade-offs.
 
 ## Usage
-Trigger this skill when the user asks to "install a skill", "link a skill", "link a skills folder", or similar.
+Trigger this skill when the user asks to "install a skill", "link a skill", "link a skill folder", or similar.
 
 ## Step 1 — Ask the User Which Strategy
 

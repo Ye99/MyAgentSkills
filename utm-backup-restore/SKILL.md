@@ -1,7 +1,6 @@
 ---
 name: utm-backup-restore
 description: Back up and restore UTM VM bundles with full macOS bundle metadata
-license: MIT
 ---
 
 # UTM VM Backup/Restore (macOS)
@@ -30,7 +29,7 @@ Before executing any backup/restore operation, ask the user to confirm:
 
 1. **VM name** (`vm_name`)
    - Default: `DevVM.utm`
-   - Ask: "Which VM do you want to backup/restore? (default: DevVM.utm)"
+   - Ask: "Which VM do you want to back up or restore? (default: DevVM.utm)"
 
 2. **Backup directory** (`backup_dir`)
    - Default: `/Volumes/T5/UTM`
@@ -60,7 +59,7 @@ Notes:
 - Renaming the resulting `.utm` is fine as long as the VM is shut down.
 
 ## Zip backups
-Use `ditto` for zip creation. Prefer to use the helper script in this skill:
+Use `ditto` for zip creation. Use the helper script in this skill when possible:
 
 ```bash
 zsh scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
@@ -69,7 +68,7 @@ zsh scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
 ## Restore a zip backup
 Restores into the default UTM Documents folder:
 
-Prefer to use the helper script in this skill:
+Use the helper script in this skill when possible:
 
 ```bash
 zsh scripts/restoreutm.sh \

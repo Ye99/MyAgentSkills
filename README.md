@@ -5,7 +5,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 
 - **add-google-models-to-opencode** ([`add-google-models-to-opencode/SKILL.md`](add-google-models-to-opencode/SKILL.md)): Add or update Google provider models in the opencode.json configuration.
 - **convert-external-images** ([`convert-external-images/SKILL.md`](convert-external-images/SKILL.md)): Convert external image files in Obsidian markdown to embedded base64 data URLs with clean reference-style syntax.
-- **create-mcp-ext-apps** ([`create_mcp_ext_apps/SKILL.md`](create_mcp_ext_apps/SKILL.md)): Build MCP ext-apps using a reference architecture with reusable transport, registration, and UI runtime patterns.
+- **create_mcp_ext_apps** ([`create_mcp_ext_apps/SKILL.md`](create_mcp_ext_apps/SKILL.md)): Build MCP ext-apps using a reference architecture with reusable transport, registration, and UI runtime patterns.
 - **format-markdownfile-code-block** ([`format-markdownfile-code-block/SKILL.md`](format-markdownfile-code-block/SKILL.md)): Normalize Markdown notes so command/code lines are easy to read.
 - **jetson-ollama-upgrade** ([`jetson-ollama-upgrade/SKILL.md`](jetson-ollama-upgrade/SKILL.md)): Upgrade Ollama on Jetson using jetson-containers, build CUDA-enabled image, and verify newer model pull support.
 - **link-opencode-skill** ([`link-opencode-skill/SKILL.md`](link-opencode-skill/SKILL.md)): Install local directories as OpenCode skills by creating symbolic links in `~/.config/opencode/skills/`.
@@ -22,7 +22,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - Use skills for conditional, scoped capabilities: domain-specific instructions, task patterns (for example, "when writing PR reviews..."), rare workflows, specialized formatting rules, and tool-specific heuristics.
 
 ## Usage
-These are standards. Your AI agent knows how to use them. :-)
+These are standards; your AI agent should apply them automatically.
 
 ## License
 MIT (see `LICENSE`).

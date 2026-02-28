@@ -1,5 +1,6 @@
 ---
-description: Add or update Google provider models in the opencode.json configuration
+name: add-google-models-to-opencode
+description: Use when a user wants to add or update Google provider models in opencode.json.
 ---
 
 # Add Google Models to OpenCode
@@ -8,7 +9,7 @@ This skill adds or updates Google AI model definitions in the OpenCode configura
 
 ## Usage
 
-Trigger this skill when the user asks to "add Google models to opencode" or similar.
+Trigger this skill when the user asks to "add Google models to OpenCode" or similar.
 
 ## Prerequisites
 

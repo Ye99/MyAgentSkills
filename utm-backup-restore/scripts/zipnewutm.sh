@@ -1,11 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
 
-if [[ "$(uname)" != "Darwin" ]]; then
-  echo "Error: This script requires macOS (Darwin)." >&2
-  exit 1
-fi
-
 usage() {
   cat <<'EOF'
 Usage:
@@ -15,7 +10,7 @@ Zips UTM .utm bundles using ditto to preserve macOS bundle metadata.
 
 Defaults:
   - If --dir is omitted, uses the current working directory.
-  - Skips any .utm where a same-name .zip already exists (unless --force).
+  - Skips any .utm bundle when a .zip with the same base name already exists (unless --force).
 
 Options:
   --dir PATH     Directory containing .utm bundles to zip
@@ -27,6 +22,16 @@ Options:
 EOF
 }
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "Error: This script requires macOS (Darwin)." >&2
+  exit 1
+fi
+
 dir=""
 force=false
 dry_run=false
@@ -37,7 +42,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)
       dir="${2:-}"
-      if [ -z "$dir" ]; then
+      if [ -z "$dir" ] || [[ "$dir" == --* ]]; then
         echo "--dir requires a PATH" >&2
         exit 2
       fi
@@ -141,4 +146,4 @@ for utm in "${utm_list[@]}"; do
     "$COLOR_NAME" "$zip_name" "$COLOR_RESET"
 done
 
-echo "done"
+echo "Done"
