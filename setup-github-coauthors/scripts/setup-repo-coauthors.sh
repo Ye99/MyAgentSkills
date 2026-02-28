@@ -4,14 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  setup-repo-coauthors.sh <repo-path> [opencode-username] [claude-username] [codex-owner-username]
+  setup-repo-coauthors.sh <repo-path> [opencode-username] [claude-username] [codex-username]
 
 Defaults:
-  opencode, claude, openai
+  opencode, claude, codex-cli
 
 Examples:
   setup-repo-coauthors.sh ~/p/some-repo
-  setup-repo-coauthors.sh ~/p/some-repo opencode-bot claude openai
+  setup-repo-coauthors.sh ~/p/some-repo opencode claude codex-cli
 EOF
 }
 
@@ -28,9 +28,9 @@ fi
 repo_path="$1"
 opencode_user="${2:-opencode}"
 claude_user="${3:-claude}"
-codex_user="${4:-openai}"
+codex_user="${4:-codex-cli}"
 
-if [[ ! -d "$repo_path/.git" ]]; then
+if ! git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: '$repo_path' is not a git repository" >&2
   exit 1
 fi
