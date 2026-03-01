@@ -41,3 +41,7 @@ When a repository is configured with local co-author settings, preserve them on 
 When searching or reading markdown files:
 - Do not read whole files if they are large.
 - Read smartly using tools (grep/search first).
+
+## Markdown Note Append Policy
+
+When appending text to a note, insert it **before the first embedded-image block** (for example, a `data:image` reference). Embedded images are kept at the bottom of note files; preserving this boundary keeps manual editing simple.
