@@ -11,6 +11,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **find-missing-files** ([`find-missing-files/SKILL.md`](find-missing-files/SKILL.md)): Find files present in a source directory that are missing from a destination directory, compared by content hash rather than filename.
 - **jetson-ollama-upgrade** ([`jetson-ollama-upgrade/SKILL.md`](jetson-ollama-upgrade/SKILL.md)): Upgrade Ollama on Jetson using jetson-containers, build CUDA-enabled image, and verify newer model pull support.
 - **link-opencode-skill** ([`link-opencode-skill/SKILL.md`](link-opencode-skill/SKILL.md)): Install local directories as OpenCode skills by creating symbolic links in `~/.config/opencode/skills/`.
+- **locationiq-nearby-poi** ([`locationiq-nearby-poi/SKILL.md`](locationiq-nearby-poi/SKILL.md)): Implement and document LocationIQ Nearby POI lookups with safe API key setup and plan-aware rate limit handling.
 - **markdown-obsidian-linker** ([`markdown-obsidian-linker/SKILL.md`](markdown-obsidian-linker/SKILL.md)): Enforce Obsidian-safe markdown headings so internal links like `[[#Header]]` resolve reliably.
 - **markdown-topic-normalizer** ([`markdown-topic-normalizer/SKILL.md`](markdown-topic-normalizer/SKILL.md)): Normalize escaped topic markers into proper Markdown headings while preserving code fences and real lists.
 - **opencode-clipboard-image** ([`opencode-clipboard-image/SKILL.md`](opencode-clipboard-image/SKILL.md)): Save clipboard images to timestamped files and return OpenCode-ready `@path` references.
