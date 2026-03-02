@@ -4,6 +4,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 ## Available Skills
 
 - **add-google-models-to-opencode** ([`add-google-models-to-opencode/SKILL.md`](add-google-models-to-opencode/SKILL.md)): Add or update Google provider models in the opencode.json configuration.
+- **dedup-copy** ([`dedup-copy/SKILL.md`](dedup-copy/SKILL.md)): Copy files from a source to a destination while eliminating content-identical duplicates via jdupes, with scored keeper selection, JSON logging, and independent verification.
 - **convert-external-images** ([`convert-external-images/SKILL.md`](convert-external-images/SKILL.md)): Convert external image files in Obsidian markdown to embedded base64 data URLs with clean reference-style syntax.
 - **create_mcp_ext_apps** ([`create_mcp_ext_apps/SKILL.md`](create_mcp_ext_apps/SKILL.md)): Build MCP ext-apps using a reference architecture with reusable transport, registration, and UI runtime patterns.
 - **format-markdownfile-code-block** ([`format-markdownfile-code-block/SKILL.md`](format-markdownfile-code-block/SKILL.md)): Normalize Markdown notes so command/code lines are easy to read.
