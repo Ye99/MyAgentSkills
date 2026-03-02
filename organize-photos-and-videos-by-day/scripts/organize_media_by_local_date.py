@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -212,10 +213,38 @@ def resolve_capture_datetime(
     return mtime_dt, "file-mtime", None
 
 
-def next_collision_path(path: Path, existing_paths: set[Path]) -> Path:
+def _file_content_hash(path: Path, block_size: int = 1024 * 1024) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(block_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _files_are_identical(a: Path, b: Path) -> bool:
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+    except OSError:
+        return False
+    return _file_content_hash(a) == _file_content_hash(b)
+
+
+def next_collision_path(
+    path: Path,
+    existing_paths: set[Path],
+    source_path: Path | None = None,
+) -> Path | None:
+    """Return the target path, or None if source already exists at the destination."""
     if path not in existing_paths and not path.exists():
         existing_paths.add(path)
         return path
+
+    if source_path is not None and path.exists() and _files_are_identical(source_path, path):
+        return None
 
     stem = path.stem
     suffix = path.suffix
@@ -226,6 +255,8 @@ def next_collision_path(path: Path, existing_paths: set[Path]) -> Path:
         if candidate not in existing_paths and not candidate.exists():
             existing_paths.add(candidate)
             return candidate
+        if source_path is not None and candidate.exists() and _files_are_identical(source_path, candidate):
+            return None
         idx += 1
 
 
@@ -443,18 +474,23 @@ def build_report(
     unknown_signatures: dict[str, dict[str, str]],
     report_path: Path,
 ) -> None:
+    skipped = [e for e in copied if e.get("status") == "skipped-already-exists"]
+    active = [e for e in copied if e.get("status") != "skipped-already-exists"]
+
     report = {
         "source_root": str(source_root),
         "destination_root": str(destination_root),
         "mode": "apply" if apply_mode else "dry-run",
         "summary": {
-            "media_copied_count": len(copied),
+            "media_copied_count": len(active),
+            "media_skipped_identical_at_destination_count": len(skipped),
             "media_copy_failed_count": len(failed),
             "missed_media_count": len(missed_media),
             "non_media_not_copied_count": len(non_media),
             "unknown_signature_count": len(unknown_signatures),
         },
-        "media_copied": copied,
+        "media_copied": active,
+        "media_skipped_identical_at_destination": skipped,
         "media_copy_failed": failed,
         "missed_media_files": missed_media,
         "non_media_not_copied": non_media,
@@ -560,7 +596,24 @@ def main() -> int:
         day_folder = capture_dt.strftime("%Y_%m_%d")
         target_dir = destination_root / year_folder / day_folder
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = next_collision_path(target_dir / source_path.name, existing_destinations)
+        target_path = next_collision_path(
+            target_dir / source_path.name,
+            existing_destinations,
+            source_path=source_path if args.apply else None,
+        )
+
+        if target_path is None:
+            copied.append(
+                {
+                    "source_path": str(source_path),
+                    "destination_path": str(target_dir / source_path.name),
+                    "classification_reason": reason,
+                    "timestamp_source": timestamp_source,
+                    "timezone": timezone_name or "",
+                    "status": "skipped-already-exists",
+                }
+            )
+            continue
 
         if not args.apply:
             copied.append(
@@ -632,8 +685,13 @@ def main() -> int:
 
     _save_signature_cache(cache_path, signature_cache)
 
+    skipped_count = sum(1 for entry in copied if entry.get("status") == "skipped-already-exists")
+    active_count = len(copied) - skipped_count
+
     print(f"Wrote report: {report_path}")
-    print(f"Media planned/copied: {len(copied)}")
+    print(f"Media planned/copied: {active_count}")
+    if skipped_count:
+        print(f"Media skipped (identical file already at destination): {skipped_count}")
     print(f"Media copy failed: {len(failed)}")
     print(f"Missed media: {len(missed_media)}")
     print(f"Non-media not copied: {len(non_media_not_copied)}")
