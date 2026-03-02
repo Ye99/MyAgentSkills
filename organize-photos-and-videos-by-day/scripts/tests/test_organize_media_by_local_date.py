@@ -138,5 +138,78 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         self.assertFalse(mod.is_explicit_non_media_path(Path("/mnt/foo/IMG_0001.MOV")))
 
 
+class IdempotentCopyTests(unittest.TestCase):
+    def test_files_are_identical_returns_true_for_same_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a.bin"
+            b = Path(tmp) / "b.bin"
+            a.write_bytes(b"identical-content-12345")
+            b.write_bytes(b"identical-content-12345")
+            self.assertTrue(mod._files_are_identical(a, b))
+
+    def test_files_are_identical_returns_false_for_different_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a.bin"
+            b = Path(tmp) / "b.bin"
+            a.write_bytes(b"content-aaa")
+            b.write_bytes(b"content-bbb")
+            self.assertFalse(mod._files_are_identical(a, b))
+
+    def test_files_are_identical_returns_false_for_different_sizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a.bin"
+            b = Path(tmp) / "b.bin"
+            a.write_bytes(b"short")
+            b.write_bytes(b"much-longer-content")
+            self.assertFalse(mod._files_are_identical(a, b))
+
+    def test_next_collision_path_returns_none_when_identical_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source" / "photo.jpg"
+            dst_dir = Path(tmp) / "dest" / "2024" / "2024_01_01"
+            src.parent.mkdir(parents=True)
+            dst_dir.mkdir(parents=True)
+            src.write_bytes(b"photo-data-xyz")
+            (dst_dir / "photo.jpg").write_bytes(b"photo-data-xyz")
+
+            existing_paths: set[Path] = set()
+            result = mod.next_collision_path(
+                dst_dir / "photo.jpg", existing_paths, source_path=src
+            )
+            self.assertIsNone(result)
+
+    def test_next_collision_path_returns_dup_when_different_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source" / "photo.jpg"
+            dst_dir = Path(tmp) / "dest" / "2024" / "2024_01_01"
+            src.parent.mkdir(parents=True)
+            dst_dir.mkdir(parents=True)
+            src.write_bytes(b"new-photo-data")
+            (dst_dir / "photo.jpg").write_bytes(b"different-photo-data")
+
+            existing_paths: set[Path] = set()
+            result = mod.next_collision_path(
+                dst_dir / "photo.jpg", existing_paths, source_path=src
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual(result.name, "photo_dup001.jpg")
+
+    def test_next_collision_path_skips_dup_when_identical_dup_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source" / "photo.jpg"
+            dst_dir = Path(tmp) / "dest" / "2024" / "2024_01_01"
+            src.parent.mkdir(parents=True)
+            dst_dir.mkdir(parents=True)
+            src.write_bytes(b"photo-data-xyz")
+            (dst_dir / "photo.jpg").write_bytes(b"other-photo")
+            (dst_dir / "photo_dup001.jpg").write_bytes(b"photo-data-xyz")
+
+            existing_paths: set[Path] = set()
+            result = mod.next_collision_path(
+                dst_dir / "photo.jpg", existing_paths, source_path=src
+            )
+            self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
