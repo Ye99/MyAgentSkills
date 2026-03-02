@@ -19,6 +19,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **photo-gps-from-exif** ([`photo-gps-from-exif/SKILL.md`](photo-gps-from-exif/SKILL.md)): Extract latitude/longitude from JPG, HEIC, and MOV files using exiftool with batch-friendly output.
 - **review-tests** ([`review-tests/SKILL.md`](review-tests/SKILL.md)): Review test suites for redundant cases and maintainability while preserving fast, clear failure diagnosis.
 - **setup-github-coauthors** ([`setup-github-coauthors/SKILL.md`](setup-github-coauthors/SKILL.md)): Set a repo-local git commit template with valid GitHub noreply co-author trailers for OpenCode, Claude, and Codex (using `openai` for `openai/codex`) with resolved account IDs and no hardcoded personal names or emails.
+- **organize-photos-and-videos-by-day** ([`organize-photos-and-videos-by-day/SKILL.md`](organize-photos-and-videos-by-day/SKILL.md)): Organize large source trees into `%Y/%Y_%m_%d` using offline geo-timezone conversion, high-fidelity media copy, and no-loss verification.
 - **utm-backup-restore** ([`utm-backup-restore/SKILL.md`](utm-backup-restore/SKILL.md)): Back up and restore UTM VM bundles with full macOS bundle metadata.
 
 ## AI agent rules
