@@ -36,7 +36,7 @@ MAC_METADATA_DIRS = {
 }
 MAC_METADATA_FILES = {".DS_Store", ".metadata_never_index", "Icon\r", ".VolumeIcon.icns"}
 MAC_METADATA_PREFIXES = ("._",)
-EXCLUDED_NON_MEDIA_EXTENSIONS = {".url", ".bk", ".sav", ".db", ".log"}
+EXCLUDED_NON_MEDIA_EXTENSIONS = {".url", ".ini", ".bk", ".sav", ".db", ".log"}
 
 
 @dataclass

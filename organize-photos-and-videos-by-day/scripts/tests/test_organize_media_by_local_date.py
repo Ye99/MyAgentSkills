@@ -131,6 +131,7 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
 
     def test_is_explicit_non_media_path_for_known_files_and_extension(self) -> None:
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/10_Bit_Log_Encoding.url")))
+        self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/desktop.ini")))
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/anything.bk")))
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/anything.sav")))
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/anything.db")))
