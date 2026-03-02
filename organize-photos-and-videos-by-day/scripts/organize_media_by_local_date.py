@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""Organize media into %Y/%Y_%m_%d folders using local capture time."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from zoneinfo import ZoneInfo
+
+
+EXIF_CAPTURE_FIELDS = [
+    ("DateTimeOriginal", "OffsetTimeOriginal"),
+    ("CreateDate", "OffsetTime"),
+    ("MediaCreateDate", None),
+    ("TrackCreateDate", None),
+]
+
+MAC_METADATA_DIRS = {
+    ".Spotlight-V100",
+    ".fseventsd",
+    ".Trashes",
+    ".TemporaryItems",
+    ".DocumentRevisions-V100",
+}
+MAC_METADATA_FILES = {".DS_Store", ".metadata_never_index", "Icon\r", ".VolumeIcon.icns"}
+MAC_METADATA_PREFIXES = ("._",)
+EXCLUDED_NON_MEDIA_EXTENSIONS = {".url", ".bk", ".sav", ".db", ".log"}
+
+
+@dataclass
+class PlannedCopy:
+    source_path: Path
+    destination_path: Path
+    timestamp_source: str
+    timezone_name: str | None
+    classification_reason: str
+
+
+def signature_key(mime_type: str | None, file_type: str | None, extension: str | None) -> str:
+    mime = (mime_type or "").strip().lower() or "unknown"
+    ftype = (file_type or "").strip() or "unknown"
+    ext = (extension or "").strip().lower() or "unknown"
+    return f"{mime}|{ftype}|{ext}"
+
+
+def classify_media_signature(
+    mime_type: str | None,
+    file_type: str | None,
+    extension: str | None,
+    cache: dict[str, str],
+) -> tuple[bool, str, bool]:
+    key = signature_key(mime_type, file_type, extension)
+    mime = (mime_type or "").strip().lower()
+
+    if mime.startswith("image/") or mime.startswith("video/"):
+        return True, "mime-prefix", False
+
+    cached = cache.get(key)
+    if cached == "media":
+        return True, "cache:media", False
+    if cached == "non_media":
+        return False, "cache:non_media", False
+
+    if not mime or mime in {"application/octet-stream", "binary/octet-stream"}:
+        return True, "unknown-signature-default-media-candidate", True
+
+    return False, "mime-non-media", False
+
+
+def is_system_metadata_path(path: Path) -> bool:
+    parts = path.parts
+    if any(part in MAC_METADATA_DIRS for part in parts):
+        return True
+    name = path.name
+    if name in MAC_METADATA_FILES:
+        return True
+    if any(name.startswith(prefix) for prefix in MAC_METADATA_PREFIXES):
+        return True
+    return False
+
+
+def is_explicit_non_media_path(path: Path) -> bool:
+    extension = path.suffix.casefold()
+    if extension in EXCLUDED_NON_MEDIA_EXTENSIONS:
+        return True
+    return False
+
+
+def parse_exif_datetime(value: str | None, offset: str | None = None) -> datetime | None:
+    if not value:
+        return None
+
+    text = value.strip()
+    candidates = [
+        "%Y:%m:%d %H:%M:%S",
+        "%Y:%m:%d %H:%M:%S.%f",
+        "%Y:%m:%d %H:%M:%S%z",
+        "%Y:%m:%d %H:%M:%S.%f%z",
+    ]
+
+    parsed: datetime | None = None
+    for fmt in candidates:
+        try:
+            parsed = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return None
+
+    if parsed.tzinfo is None and offset:
+        for tz_fmt in ["%z", "%z"]:
+            try:
+                tz_part = datetime.strptime(offset.strip(), tz_fmt).tzinfo
+                if tz_part is not None:
+                    parsed = parsed.replace(tzinfo=tz_part)
+                    break
+            except ValueError:
+                continue
+    return parsed
+
+
+def parse_gps_utc_datetime(date_text: str | None, time_text: str | None) -> datetime | None:
+    if not date_text or not time_text:
+        return None
+
+    date_clean = date_text.strip()
+    time_clean = str(time_text).strip()
+    if not date_clean or not time_clean:
+        return None
+
+    if " " in time_clean:
+        time_clean = time_clean.split(" ", 1)[0]
+    if "/" in time_clean:
+        parts = [segment.strip() for segment in time_clean.split(":")]
+        if len(parts) == 3:
+            try:
+                values: list[float] = []
+                for segment in parts:
+                    numerator, denominator = segment.split("/")
+                    values.append(float(numerator) / float(denominator))
+                hours = int(values[0])
+                minutes = int(values[1])
+                seconds = values[2]
+                time_clean = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}".rstrip("0").rstrip(".")
+            except (ValueError, ZeroDivisionError):
+                return None
+
+    for fmt in ["%Y:%m:%d %H:%M:%S", "%Y:%m:%d %H:%M:%S.%f"]:
+        try:
+            parsed = datetime.strptime(f"{date_clean} {time_clean}", fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _get_first_exif_datetime(record: dict[str, Any]) -> tuple[datetime | None, str | None]:
+    for field, offset_field in EXIF_CAPTURE_FIELDS:
+        value = record.get(field)
+        offset = record.get(offset_field) if offset_field else None
+        parsed = parse_exif_datetime(value, offset)
+        if parsed is not None:
+            return parsed, field
+    return None, None
+
+
+def resolve_capture_datetime(
+    record: dict[str, Any],
+    creation_dt: datetime | None,
+    mtime_dt: datetime,
+    timezone_lookup: Callable[[float, float], str | None],
+) -> tuple[datetime, str, str | None]:
+    lat = record.get("GPSLatitude")
+    lon = record.get("GPSLongitude")
+    lat_lon_available = lat is not None and lon is not None
+
+    exif_dt, exif_source = _get_first_exif_datetime(record)
+    if exif_dt is not None:
+        if exif_dt.tzinfo is not None:
+            if lat_lon_available:
+                timezone_name = timezone_lookup(float(lat), float(lon))
+                if timezone_name:
+                    local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+                    return local_dt, f"{exif_source}-offset-converted", timezone_name
+            return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
+
+        gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
+        if gps_utc is not None and lat_lon_available:
+            timezone_name = timezone_lookup(float(lat), float(lon))
+            if timezone_name:
+                local_dt = gps_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+                return local_dt, "gps-utc-converted", timezone_name
+            return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
+
+        return exif_dt, f"{exif_source}-naive-local", None
+
+    if creation_dt is not None:
+        return creation_dt, "file-creation-time", None
+
+    return mtime_dt, "file-mtime", None
+
+
+def next_collision_path(path: Path, existing_paths: set[Path]) -> Path:
+    if path not in existing_paths and not path.exists():
+        existing_paths.add(path)
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}_dup{idx:03d}{suffix}"
+        if candidate not in existing_paths and not candidate.exists():
+            existing_paths.add(candidate)
+            return candidate
+        idx += 1
+
+
+def _create_timezone_lookup(cache_precision: int = 3) -> Callable[[float, float], str | None]:
+    try:
+        from timezonefinder import TimezoneFinder
+    except ImportError as exc:
+        raise RuntimeError(
+            "timezonefinder is required for offline timezone polygon lookup. "
+            "Install it before running this script."
+        ) from exc
+
+    finder = TimezoneFinder(in_memory=True)
+    cache: dict[tuple[float, float], str | None] = {}
+
+    def lookup(lat: float, lon: float) -> str | None:
+        key = (round(lat, cache_precision), round(lon, cache_precision))
+        if key in cache:
+            return cache[key]
+        timezone_name = finder.timezone_at(lat=lat, lng=lon)
+        if timezone_name is None:
+            timezone_name = finder.closest_timezone_at(lat=lat, lng=lon)
+        cache[key] = timezone_name
+        return timezone_name
+
+    return lookup
+
+
+def _load_signature_cache(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in data.items():
+        if value in {"media", "non_media"}:
+            normalized[str(key)] = value
+    return normalized
+
+
+def _save_signature_cache(path: Path, cache: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
+
+
+def _extract_metadata_records(source_root: Path) -> list[dict[str, Any]]:
+    cmd = [
+        "exiftool",
+        "-r",
+        "-j",
+        "-n",
+        "-api",
+        "QuickTimeUTC=1",
+        "-SourceFile",
+        "-FileName",
+        "-MIMEType",
+        "-FileType",
+        "-FileTypeExtension",
+        "-DateTimeOriginal",
+        "-CreateDate",
+        "-MediaCreateDate",
+        "-TrackCreateDate",
+        "-OffsetTimeOriginal",
+        "-OffsetTime",
+        "-GPSDateStamp",
+        "-GPSTimeStamp",
+        "-GPSLatitude",
+        "-GPSLongitude",
+        str(source_root),
+    ]
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("exiftool is required but not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"exiftool failed: {exc.stderr.strip()}") from exc
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse exiftool JSON output") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("Unexpected exiftool payload format")
+    return payload
+
+
+def _iter_source_files(source_root: Path):
+    for dirpath, dirnames, filenames in os.walk(source_root):
+        dirnames.sort()
+        filenames.sort()
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            try:
+                if path.is_file():
+                    yield path.resolve()
+            except OSError:
+                continue
+
+
+def merge_with_source_files(source_root: Path, metadata_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_path: dict[Path, dict[str, Any]] = {}
+    for record in metadata_records:
+        source = record.get("SourceFile")
+        if not source:
+            continue
+        try:
+            resolved = Path(str(source)).resolve()
+        except OSError:
+            continue
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        by_path[resolved] = dict(record)
+
+    merged: list[dict[str, Any]] = []
+    for source_path in _iter_source_files(source_root):
+        record = by_path.get(source_path)
+        if record is None:
+            record = {
+                "SourceFile": str(source_path),
+                "FileName": source_path.name,
+                "MIMEType": None,
+                "FileType": None,
+                "FileTypeExtension": source_path.suffix.lstrip("."),
+            }
+        else:
+            record = dict(record)
+            record["SourceFile"] = str(source_path)
+        merged.append(record)
+    return merged
+
+
+def _get_file_creation_time(path: Path) -> datetime | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    birth = getattr(stat, "st_birthtime", None)
+    if birth is None:
+        return None
+    return datetime.fromtimestamp(birth)
+
+
+def _load_find_missing_module(repo_root: Path):
+    script_path = repo_root / "find-missing-files" / "scripts" / "check_missing_files_between_two_folders.py"
+    if not script_path.exists():
+        return None
+
+    module_name = "find_missing_impl"
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        return None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def verify_with_find_missing(
+    media_source_paths: list[Path],
+    destination_root: Path,
+    workers: int,
+    verbose: bool,
+) -> list[str]:
+    repo_root = Path(__file__).resolve().parents[2]
+    module = _load_find_missing_module(repo_root)
+    if module is None:
+        return []
+
+    with tempfile.TemporaryDirectory(prefix="media-verify-") as tmp_dir:
+        shadow_root = Path(tmp_dir)
+        rel_to_source: dict[str, str] = {}
+
+        for index, source_path in enumerate(media_source_paths):
+            rel_name = f"{index:09d}_{source_path.name}"
+            shadow_path = shadow_root / rel_name
+            try:
+                os.symlink(source_path, shadow_path)
+            except OSError:
+                shutil.copy2(source_path, shadow_path)
+            rel_to_source[rel_name] = str(source_path)
+
+        skip_extensions = module.normalized_extensions(())
+        dest_index = module.build_dest_index(destination_root, (), skip_extensions, verbose)
+        dest_hash_sets = module.build_dest_hash_sets(dest_index, 1024 * 1024, workers, verbose)
+        missing_rel = module.find_missing_files(
+            shadow_root,
+            dest_hash_sets,
+            (),
+            skip_extensions,
+            1024 * 1024,
+            workers,
+            verbose,
+        )
+        return [rel_to_source.get(rel, rel) for rel in missing_rel]
+
+
+def build_report(
+    source_root: Path,
+    destination_root: Path,
+    apply_mode: bool,
+    copied: list[dict[str, str]],
+    failed: list[dict[str, str]],
+    non_media: list[str],
+    missed_media: list[str],
+    unknown_signatures: dict[str, dict[str, str]],
+    report_path: Path,
+) -> None:
+    report = {
+        "source_root": str(source_root),
+        "destination_root": str(destination_root),
+        "mode": "apply" if apply_mode else "dry-run",
+        "summary": {
+            "media_copied_count": len(copied),
+            "media_copy_failed_count": len(failed),
+            "missed_media_count": len(missed_media),
+            "non_media_not_copied_count": len(non_media),
+            "unknown_signature_count": len(unknown_signatures),
+        },
+        "media_copied": copied,
+        "media_copy_failed": failed,
+        "missed_media_files": missed_media,
+        "non_media_not_copied": non_media,
+        "unknown_signatures_needing_ai_lookup": list(unknown_signatures.values()),
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Organize media by local capture date into %Y/%Y_%m_%d folders"
+    )
+    parser.add_argument("source_root", help="Source folder tree root")
+    parser.add_argument("destination_root", help="Destination root")
+    parser.add_argument(
+        "--signature-cache",
+        default=str(Path(__file__).resolve().parent / "signature_type_cache.json"),
+        help="Path to signature classification cache JSON",
+    )
+    parser.add_argument(
+        "--report",
+        default="organize_media_report.json",
+        help="JSON report output path",
+    )
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="Hash workers for verification")
+    parser.add_argument("--verbose", action="store_true", help="Verbose verification logs")
+    parser.add_argument("--apply", action="store_true", help="Apply copy actions")
+    args = parser.parse_args()
+
+    source_root = Path(args.source_root).expanduser().resolve()
+    destination_root = Path(args.destination_root).expanduser().resolve()
+    report_path = Path(args.report).expanduser().resolve()
+    cache_path = Path(args.signature_cache).expanduser().resolve()
+
+    if not source_root.is_dir():
+        print(f"Source root not found: {source_root}", file=sys.stderr)
+        return 2
+    destination_root.mkdir(parents=True, exist_ok=True)
+
+    signature_cache = _load_signature_cache(cache_path)
+    timezone_lookup = _create_timezone_lookup()
+    metadata_records = _extract_metadata_records(source_root)
+    records = merge_with_source_files(source_root, metadata_records)
+
+    copied: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    non_media_not_copied: list[str] = []
+    unknown_signatures: dict[str, dict[str, str]] = {}
+    media_sources: list[Path] = []
+    existing_destinations: set[Path] = set()
+
+    for record in records:
+        source_path = Path(str(record.get("SourceFile") or "")).resolve()
+        if not source_path.exists() or not source_path.is_file():
+            continue
+
+        if is_system_metadata_path(source_path):
+            non_media_not_copied.append(str(source_path))
+            continue
+
+        if is_explicit_non_media_path(source_path):
+            non_media_not_copied.append(str(source_path))
+            continue
+
+        mime_type = record.get("MIMEType")
+        file_type = record.get("FileType")
+        extension = record.get("FileTypeExtension") or source_path.suffix.lstrip(".")
+
+        is_media, reason, needs_lookup = classify_media_signature(
+            mime_type=mime_type,
+            file_type=file_type,
+            extension=extension,
+            cache=signature_cache,
+        )
+
+        key = signature_key(mime_type, file_type, extension)
+        if needs_lookup and key not in unknown_signatures:
+            unknown_signatures[key] = {
+                "signature_key": key,
+                "mime_type": str(mime_type or ""),
+                "file_type": str(file_type or ""),
+                "example_source_path": str(source_path),
+                "note": "Lookup once via AI/web and cache decision as media/non_media.",
+            }
+
+        if not is_media:
+            non_media_not_copied.append(str(source_path))
+            continue
+
+        media_sources.append(source_path)
+
+        creation_dt = _get_file_creation_time(source_path)
+        mtime_dt = datetime.fromtimestamp(source_path.stat().st_mtime)
+        capture_dt, timestamp_source, timezone_name = resolve_capture_datetime(
+            record=record,
+            creation_dt=creation_dt,
+            mtime_dt=mtime_dt,
+            timezone_lookup=timezone_lookup,
+        )
+
+        year_folder = capture_dt.strftime("%Y")
+        day_folder = capture_dt.strftime("%Y_%m_%d")
+        target_dir = destination_root / year_folder / day_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = next_collision_path(target_dir / source_path.name, existing_destinations)
+
+        if not args.apply:
+            copied.append(
+                {
+                    "source_path": str(source_path),
+                    "destination_path": str(target_path),
+                    "classification_reason": reason,
+                    "timestamp_source": timestamp_source,
+                    "timezone": timezone_name or "",
+                    "status": "planned",
+                }
+            )
+            continue
+
+        try:
+            shutil.copy2(source_path, target_path)
+            copied.append(
+                {
+                    "source_path": str(source_path),
+                    "destination_path": str(target_path),
+                    "classification_reason": reason,
+                    "timestamp_source": timestamp_source,
+                    "timezone": timezone_name or "",
+                    "status": "copied",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed.append(
+                {
+                    "source_path": str(source_path),
+                    "error": str(exc),
+                }
+            )
+
+    missed_media: list[str] = []
+
+    if args.apply:
+        copied_sources = {entry["source_path"] for entry in copied if entry["status"] == "copied"}
+        for source_path in media_sources:
+            if str(source_path) not in copied_sources:
+                missed_media.append(str(source_path))
+
+        missing_by_hash = verify_with_find_missing(
+            media_source_paths=media_sources,
+            destination_root=destination_root,
+            workers=max(1, args.workers),
+            verbose=args.verbose,
+        )
+        for source_path in missing_by_hash:
+            if source_path not in missed_media:
+                missed_media.append(source_path)
+
+    for entry in failed:
+        source_path = entry["source_path"]
+        if source_path not in missed_media:
+            missed_media.append(source_path)
+
+    build_report(
+        source_root=source_root,
+        destination_root=destination_root,
+        apply_mode=args.apply,
+        copied=copied,
+        failed=failed,
+        non_media=non_media_not_copied,
+        missed_media=sorted(missed_media),
+        unknown_signatures=unknown_signatures,
+        report_path=report_path,
+    )
+
+    _save_signature_cache(cache_path, signature_cache)
+
+    print(f"Wrote report: {report_path}")
+    print(f"Media planned/copied: {len(copied)}")
+    print(f"Media copy failed: {len(failed)}")
+    print(f"Missed media: {len(missed_media)}")
+    print(f"Non-media not copied: {len(non_media_not_copied)}")
+    print(f"Unknown signatures needing AI lookup: {len(unknown_signatures)}")
+
+    if args.apply and missed_media:
+        print("Verification failed: missed media detected. See report for details.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
