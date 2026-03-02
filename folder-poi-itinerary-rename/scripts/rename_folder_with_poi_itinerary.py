@@ -9,6 +9,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
+
+MAX_FOLDER_NAME_LEN = 120
+DATE_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}(?:_|$)")
+YEAR_NAME_RE = re.compile(r"^\d{4}$")
+DATE_NAME_RE = re.compile(r"^(\d{4})_(\d{2})_(\d{2})$")
 
 
 @dataclass(frozen=True)
@@ -229,15 +236,6 @@ def _city_from_address(address: dict[str, Any]) -> str | None:
     return None
 
 
-def _street_from_address(address: dict[str, Any]) -> str | None:
-    street_keys = ["road", "pedestrian", "footway", "path", "residential", "suburb"]
-    for key in street_keys:
-        value = address.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
 def choose_preferred_label(poi_results: list[dict[str, Any]]) -> str | None:
     for poi in poi_results:
         name = poi.get("name")
@@ -245,16 +243,11 @@ def choose_preferred_label(poi_results: list[dict[str, Any]]) -> str | None:
             return name.strip()
 
     for poi in poi_results:
-        address = poi.get("address") if isinstance(poi.get("address"), dict) else {}
+        raw_address = poi.get("address")
+        address: dict[str, Any] = raw_address if isinstance(raw_address, dict) else {}
         city = _city_from_address(address)
         if city:
             return city
-
-    for poi in poi_results:
-        address = poi.get("address") if isinstance(poi.get("address"), dict) else {}
-        street = _street_from_address(address)
-        if street:
-            return street
 
     for poi in poi_results:
         name = poi.get("name")
@@ -266,8 +259,10 @@ def choose_preferred_label(poi_results: list[dict[str, Any]]) -> str | None:
 
 def normalize_label(label: str) -> str:
     ascii_label = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", ascii_label).strip("_")
-    return re.sub(r"_+", "_", cleaned).upper()
+    parts = re.findall(r"[A-Za-z0-9]+", ascii_label)
+    if not parts:
+        return ""
+    return "".join(part[:1].upper() + part[1:].lower() for part in parts)
 
 
 def dedupe_labels(labels: list[str]) -> list[str]:
@@ -275,11 +270,20 @@ def dedupe_labels(labels: list[str]) -> list[str]:
     seen: set[str] = set()
     for label in labels:
         normalized = normalize_label(label)
-        if not normalized or normalized in seen:
+        if normalized.casefold() == "unknownlocation":
             continue
-        seen.add(normalized)
+        if is_low_signal_label(normalized):
+            continue
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
         unique.append(normalized)
     return unique
+
+
+def is_low_signal_label(label: str) -> bool:
+    return bool(re.search(r"\d", label))
 
 
 def labels_in_itinerary_order(sets: list[LocationSet]) -> list[str]:
@@ -287,11 +291,89 @@ def labels_in_itinerary_order(sets: list[LocationSet]) -> list[str]:
     return [location_set.label for location_set in ordered if location_set.label]
 
 
-def build_target_name(base_name: str, labels: list[str]) -> str:
+def build_target_name(base_name: str, labels: list[str], use_local_agent_compaction: bool = False) -> str:
     deduped = dedupe_labels(labels)
     if not deduped:
         return base_name
-    return f"{base_name}_{'_'.join(deduped)}"
+
+    candidate = f"{base_name}_{','.join(deduped)}"
+    if len(candidate) <= MAX_FOLDER_NAME_LEN:
+        return candidate
+
+    if use_local_agent_compaction:
+        compacted = compact_folder_name_with_local_agent(base_name, deduped, MAX_FOLDER_NAME_LEN)
+        if compacted and len(compacted) <= MAX_FOLDER_NAME_LEN:
+            return compacted
+
+    return candidate
+
+
+def extract_base_date_name(folder_name: str) -> str:
+    if DATE_FOLDER_RE.match(folder_name):
+        return folder_name[:10]
+    return folder_name
+
+
+def is_supported_date_folder_path(folder: Path) -> bool:
+    match = DATE_NAME_RE.match(folder.name)
+    if not match:
+        return False
+
+    parent_name = folder.parent.name
+    return bool(YEAR_NAME_RE.match(parent_name) and parent_name == match.group(1))
+
+
+def find_available_local_agent() -> str | None:
+    for name in ["opencode", "claude", "codex"]:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def compact_folder_name_with_local_agent(base_name: str, labels: list[str], max_len: int) -> str | None:
+    agent = find_available_local_agent()
+    if not agent:
+        return None
+
+    prompt = (
+        "Compact this folder name while preserving POI order and readability. "
+        "Return plain text only in format DATE_POE1,POE2 with PascalCase POE tokens, "
+        "no delimiters inside a POE token. "
+        f"Date prefix: {base_name}. "
+        f"POE labels: {', '.join(labels)}. "
+        f"Max length: {max_len}."
+    )
+
+    command_attempts: list[list[str]]
+    if agent == "opencode":
+        command_attempts = [["opencode", "--prompt", prompt], ["opencode", "-p", prompt]]
+    elif agent == "claude":
+        command_attempts = [["claude", "-p", prompt], ["claude", "--print", prompt]]
+    else:
+        command_attempts = [["codex", "-p", prompt], ["codex", "--prompt", prompt]]
+
+    for cmd in command_attempts:
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=20)
+            if result.returncode != 0:
+                continue
+            content = result.stdout.strip()
+            if not content:
+                continue
+            compacted = sanitize_compacted_name(content.splitlines()[0], base_name)
+            if compacted.startswith(f"{base_name}_") and len(compacted) <= max_len:
+                return compacted
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def sanitize_compacted_name(name: str, base_name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_,]+", "", name)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned.startswith(base_name):
+        return f"{base_name}_{cleaned}" if cleaned else base_name
+    return cleaned
 
 
 def fetch_nearby_poi(
@@ -379,6 +461,11 @@ def main() -> int:
     parser.add_argument("--radius", type=int, default=1000, help="Nearby API search radius in meters")
     parser.add_argument("--region", default="us1", choices=["us1", "eu1"], help="LocationIQ region")
     parser.add_argument("--seed", default=None, help="Optional deterministic sampling seed")
+    parser.add_argument(
+        "--use-local-agent-compaction",
+        action="store_true",
+        help="Use local coding agent CLI (opencode/claude/codex) to compact long folder names",
+    )
     parser.add_argument("--apply", action="store_true", help="Apply folder rename")
     args = parser.parse_args()
 
@@ -386,6 +473,10 @@ def main() -> int:
     if not folder.exists() or not folder.is_dir():
         print(f"Folder not found: {folder}", file=sys.stderr)
         return 2
+
+    if not is_supported_date_folder_path(folder):
+        print("Skipping folder: expected path format YYYY/YYYY_MM_DD.")
+        return 0
 
     if not args.key:
         print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
@@ -402,7 +493,12 @@ def main() -> int:
     _assign_labels(sets, api_key=args.key, tag=args.tag, radius=args.radius, region=args.region)
 
     ordered_labels = labels_in_itinerary_order(sets)
-    target_name = build_target_name(folder.name, ordered_labels)
+    base_name = extract_base_date_name(folder.name)
+    target_name = build_target_name(
+        base_name,
+        ordered_labels,
+        use_local_agent_compaction=args.use_local_agent_compaction,
+    )
 
     print(f"GPS-bearing files: {len(points)}")
     print(f"Sampled files: {len(sampled)}")
