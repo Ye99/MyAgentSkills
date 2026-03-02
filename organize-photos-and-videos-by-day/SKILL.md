@@ -35,6 +35,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 9. Unknown signatures are cached; unresolved unknown signatures default to media-candidate to avoid loss.
 10. Explicit non-media exclusions (never copied, never signature-looked-up):
    - `*.url`
+   - `*.ini`
    - `*.bk`
    - `*.sav`
    - `*.db`
@@ -45,6 +46,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 - `exiftool`
 - `timezonefinder` (offline timezone polygons)
 - Python `zoneinfo` (IANA timezone rules)
+- Optional but recommended for unknown-signature triage: `ffprobe` (from `ffmpeg`)
 
 ## Usage
 
@@ -69,9 +71,16 @@ Optional:
 ## Unknown Signature Workflow (AI + Cache)
 
 1. Run dry-run and inspect `unknown_signatures_needing_ai_lookup` in report.
-2. For each unique signature, perform internet lookup once via AI agent.
-3. Add classification to signature cache (`media` or `non_media`).
-4. Re-run organizer; cache avoids repeated lookups.
+2. For each unique signature, try `ffprobe` first on the example file path:
+
+```bash
+ffprobe -v error -show_entries format=format_name:stream=codec_type,codec_name -of json "/path/to/example"
+```
+
+3. If `ffprobe` reports `video` or `audio` stream(s), classify as `media` in cache.
+4. If it reports no streams, invalid data, or only non-media stream types (for example subtitle/text), classify as `non_media`.
+5. Only if still uncertain, perform internet lookup once via AI agent.
+6. Re-run organizer; cache avoids repeated lookups.
 
 Known explicit non-media exclusions above are skipped before this workflow.
 
