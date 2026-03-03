@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import math
 import os
@@ -12,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -20,13 +23,18 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 MAX_FOLDER_NAME_LEN = 120
 DATE_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}(?:_|$)")
 YEAR_NAME_RE = re.compile(r"^\d{4}$")
 DATE_NAME_RE = re.compile(r"^(\d{4})_(\d{2})_(\d{2})$")
+APP_USER_AGENT = "Lookup_POI_withlocalcache"
+
+
+def default_cache_path() -> Path:
+    return Path(__file__).resolve().parent / "cache" / "geo_api_cache.json"
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,71 @@ class MediaPoint:
 class LocationSet:
     points: list[MediaPoint]
     label: str | None = None
+
+
+class LocationIQRateLimiter:
+    def __init__(self, requests_per_second: float) -> None:
+        self.requests_per_second = max(requests_per_second, 0.1)
+        self._min_interval_sec = 1.0 / self.requests_per_second
+        self._lock = threading.Lock()
+        self._next_allowed_time = 0.0
+
+    def wait_for_slot(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_allowed_time:
+                time.sleep(self._next_allowed_time - now)
+                now = time.monotonic()
+            self._next_allowed_time = now + self._min_interval_sec
+
+
+class LocalApiCache:
+    def __init__(self, cache_path: Path) -> None:
+        self.cache_path = cache_path
+        self._lock = threading.Lock()
+        self._data: dict[str, Any] = {"version": 1, "entries": {}}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.cache_path.exists():
+            return
+        try:
+            loaded = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+
+        if isinstance(loaded, dict) and isinstance(loaded.get("entries"), dict):
+            self._data = loaded
+
+    def _write(self) -> None:
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(self._data, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
+        temp_path.replace(self.cache_path)
+
+    def _key(self, service: str, params: dict[str, Any]) -> str:
+        payload = {"service": service, "params": params}
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def get(self, service: str, params: dict[str, Any]) -> Any | None:
+        key = self._key(service, params)
+        with self._lock:
+            entry = self._data["entries"].get(key)
+            if not isinstance(entry, dict):
+                return None
+            return entry.get("payload")
+
+    def set(self, service: str, params: dict[str, Any], payload: Any) -> None:
+        key = self._key(service, params)
+        with self._lock:
+            self._data["entries"][key] = {
+                "service": service,
+                "params": params,
+                "payload": payload,
+                "updated_at": int(time.time()),
+            }
+            self._write()
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -257,6 +330,215 @@ def choose_preferred_label(poi_results: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _is_rejected_label(label: str, category: str | None = None, candidate_type: str | None = None) -> bool:
+    lower_label = label.strip().lower()
+    lower_category = (category or "").strip().lower()
+    lower_type = (candidate_type or "").strip().lower()
+
+    timezone_tokens = ["timezone", "america/", "asia/", "africa/", "europe/", "pacific/"]
+    if any(token in lower_label for token in timezone_tokens):
+        return True
+
+    if lower_type == "timezone":
+        return True
+
+    if lower_category == "boundary" and lower_type in {
+        "timezone",
+        "political",
+        "census",
+        "administrative",
+        "cadastral",
+    }:
+        return True
+
+    return False
+
+
+def choose_nominatim_label(payload: dict[str, Any]) -> str | None:
+    category = str(payload.get("category") or payload.get("class") or "")
+    candidate_type = str(payload.get("type") or "")
+
+    name = payload.get("name")
+    if isinstance(name, str) and name.strip():
+        picked = name.strip()
+        if not _is_rejected_label(picked, category=category, candidate_type=candidate_type):
+            return picked
+
+    address = payload.get("address")
+    if isinstance(address, dict):
+        for key in ["tourism", "attraction", "natural", "leisure", "historic", "waterway"]:
+            value = address.get(key)
+            if isinstance(value, str) and value.strip():
+                picked = value.strip()
+                if not _is_rejected_label(picked, category=category, candidate_type=candidate_type):
+                    return picked
+
+    display_name = payload.get("display_name")
+    if isinstance(display_name, str) and display_name.strip():
+        first_segment = display_name.split(",", 1)[0].strip()
+        if first_segment:
+            if not _is_rejected_label(first_segment, category=category, candidate_type=candidate_type):
+                return first_segment
+
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_numbers(values: list[float | None], higher_is_better: bool) -> list[float | None]:
+    available = [value for value in values if value is not None]
+    if not available:
+        return [None for _ in values]
+
+    min_value = min(available)
+    max_value = max(available)
+    if max_value == min_value:
+        base = [1.0 if value is not None else None for value in values]
+    else:
+        base = [
+            ((value - min_value) / (max_value - min_value)) if value is not None else None
+            for value in values
+        ]
+
+    if higher_is_better:
+        return base
+    return [(1.0 - value) if value is not None else None for value in base]
+
+
+def normalize_candidate_metrics(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = [dict(candidate) for candidate in candidates]
+
+    importance_values = [_as_float(candidate.get("importance_raw")) for candidate in normalized]
+    place_rank_values = [_as_float(candidate.get("place_rank_raw")) for candidate in normalized]
+    distance_values = [_as_float(candidate.get("distance_m")) for candidate in normalized]
+
+    importance_norm = _normalize_numbers(importance_values, higher_is_better=True)
+    place_rank_norm = _normalize_numbers(place_rank_values, higher_is_better=True)
+    proximity_norm = _normalize_numbers(distance_values, higher_is_better=False)
+
+    for idx, candidate in enumerate(normalized):
+        candidate["importance_norm"] = importance_norm[idx]
+        candidate["place_rank_norm"] = place_rank_norm[idx]
+        candidate["proximity_norm"] = proximity_norm[idx]
+
+    return normalized
+
+
+def _candidate_distance_m(candidate_lat: Any, candidate_lon: Any, centroid_lat: float, centroid_lon: float) -> float | None:
+    lat = _as_float(candidate_lat)
+    lon = _as_float(candidate_lon)
+    if lat is None or lon is None:
+        return None
+    return haversine_m(centroid_lat, centroid_lon, lat, lon)
+
+
+def build_locationiq_candidates(
+    poi_results: list[dict[str, Any]],
+    centroid_lat: float,
+    centroid_lon: float,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for poi in poi_results:
+        name = poi.get("name")
+        address_raw = poi.get("address")
+        address: dict[str, Any] = address_raw if isinstance(address_raw, dict) else {}
+
+        label = name.strip() if isinstance(name, str) and name.strip() else None
+        if label is None:
+            label = _city_from_address(address)
+        if label is None:
+            road = address.get("road")
+            if isinstance(road, str) and road.strip():
+                label = road.strip()
+        if label is None:
+            continue
+
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        candidates.append(
+            {
+                "label": label,
+                "source": "locationiq",
+                "category": str(poi.get("class") or poi.get("category") or ""),
+                "type": str(poi.get("type") or poi.get("tag_type") or ""),
+                "importance_raw": _as_float(poi.get("importance")),
+                "place_rank_raw": _as_float(poi.get("place_rank")),
+                "distance_m": _candidate_distance_m(poi.get("lat"), poi.get("lon"), centroid_lat, centroid_lon),
+            }
+        )
+
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        label = str(candidate.get("label") or "")
+        category = str(candidate.get("category") or "")
+        candidate_type = str(candidate.get("type") or "")
+        if _is_rejected_label(label, category=category, candidate_type=candidate_type):
+            continue
+        filtered.append(candidate)
+
+    return filtered
+
+
+def build_nominatim_candidates(payload: dict[str, Any], centroid_lat: float, centroid_lon: float) -> list[dict[str, Any]]:
+    label = choose_nominatim_label(payload)
+    if not label:
+        return []
+
+    category = str(payload.get("category") or payload.get("class") or "")
+    candidate_type = str(payload.get("type") or "")
+
+    if category.casefold() == "boundary" and candidate_type.casefold() == "protected_area" and "/" in label:
+        split_candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_part in label.split("/"):
+            part = raw_part.strip()
+            if not part:
+                continue
+            key = part.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            split_candidates.append(
+                {
+                    "label": part,
+                    "source": "nominatim",
+                    "category": "natural",
+                    "type": "protected_area_fragment",
+                    "importance_raw": _as_float(payload.get("importance")),
+                    "place_rank_raw": _as_float(payload.get("place_rank")),
+                    "distance_m": _candidate_distance_m(payload.get("lat"), payload.get("lon"), centroid_lat, centroid_lon),
+                }
+            )
+        return split_candidates
+
+    if _is_rejected_label(label, category=category, candidate_type=candidate_type):
+        return []
+
+    return [
+        {
+            "label": label,
+            "source": "nominatim",
+            "category": str(payload.get("category") or payload.get("class") or ""),
+            "type": str(payload.get("type") or ""),
+            "importance_raw": _as_float(payload.get("importance")),
+            "place_rank_raw": _as_float(payload.get("place_rank")),
+            "distance_m": _candidate_distance_m(payload.get("lat"), payload.get("lon"), centroid_lat, centroid_lon),
+        }
+    ]
+
+
 def normalize_label(label: str) -> str:
     ascii_label = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
     parts = re.findall(r"[A-Za-z0-9]+", ascii_label)
@@ -293,7 +575,12 @@ def dedupe_labels(labels: list[str]) -> list[str]:
 
 
 def is_low_signal_label(label: str) -> bool:
-    return bool(re.search(r"\d", label))
+    lower = label.casefold()
+    if bool(re.search(r"\d", label)):
+        return True
+    if "timezone" in lower:
+        return True
+    return False
 
 
 def labels_in_itinerary_order(sets: list[LocationSet]) -> list[str]:
@@ -411,7 +698,24 @@ def fetch_nearby_poi(
     radius: int,
     region: str,
     retries: int = 3,
+    locationiq_rate_limiter: LocationIQRateLimiter | None = None,
+    api_cache: LocalApiCache | None = None,
 ) -> list[dict[str, Any]]:
+    cache_params = {
+        "lat": f"{lat:.7f}",
+        "lon": f"{lon:.7f}",
+        "tag": tag,
+        "radius": int(radius),
+        "region": region,
+        "format": "json",
+    }
+    if api_cache is not None:
+        cached_payload = api_cache.get("locationiq-nearby", cache_params)
+        if isinstance(cached_payload, list):
+            return cached_payload
+        if cached_payload is not None:
+            return []
+
     params = {
         "key": api_key,
         "lat": lat,
@@ -426,22 +730,114 @@ def fetch_nearby_poi(
     while True:
         attempt += 1
         try:
+            if locationiq_rate_limiter is not None:
+                locationiq_rate_limiter.wait_for_slot()
             with urlopen(endpoint, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            if api_cache is not None:
+                api_cache.set("locationiq-nearby", cache_params, payload)
             if isinstance(payload, list):
                 return payload
             return []
         except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                error_payload: Any = json.loads(body)
+            except json.JSONDecodeError:
+                error_payload = {"error_body": body}
+
+            if api_cache is not None:
+                api_cache.set("locationiq-nearby", cache_params, error_payload)
+
             if exc.code == 429 and attempt < retries:
-                time.sleep(0.5 * (2 ** (attempt - 1)))
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                retry_after_sec = float(retry_after) if retry_after and retry_after.isdigit() else 0.0
+                jitter = random.uniform(0.05, 0.25)
+                time.sleep(max(retry_after_sec, 0.5 * (2 ** (attempt - 1)) + jitter))
                 continue
-            message = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LocationIQ HTTP {exc.code}: {message}") from exc
+            if exc.code in {404, 429}:
+                return []
+            raise RuntimeError(f"LocationIQ HTTP {exc.code}: {body}") from exc
         except URLError as exc:
             if attempt < retries:
                 time.sleep(0.5 * (2 ** (attempt - 1)))
                 continue
             raise RuntimeError(f"LocationIQ network error: {exc.reason}") from exc
+
+
+def fetch_nominatim_reverse(
+    lat: float,
+    lon: float,
+    zoom: int,
+    layer: str,
+    retries: int = 2,
+    nominatim_rate_limiter: LocationIQRateLimiter | None = None,
+    api_cache: LocalApiCache | None = None,
+) -> dict[str, Any]:
+    cache_params = {
+        "lat": f"{lat:.7f}",
+        "lon": f"{lon:.7f}",
+        "zoom": int(zoom),
+        "layer": layer,
+        "format": "jsonv2",
+        "addressdetails": 1,
+        "namedetails": 1,
+        "extratags": 1,
+        "accept-language": "en",
+    }
+    if api_cache is not None:
+        cached_payload = api_cache.get("nominatim-reverse", cache_params)
+        if isinstance(cached_payload, dict):
+            return cached_payload
+        if cached_payload is not None:
+            return {}
+
+    params = {
+        "format": "jsonv2",
+        "lat": lat,
+        "lon": lon,
+        "addressdetails": 1,
+        "namedetails": 1,
+        "extratags": 1,
+        "accept-language": "en",
+        "zoom": zoom,
+        "layer": layer,
+    }
+    endpoint = f"https://nominatim.openstreetmap.org/reverse?{urlencode(params)}"
+    request = Request(endpoint, headers={"User-Agent": APP_USER_AGENT})
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            if nominatim_rate_limiter is not None:
+                nominatim_rate_limiter.wait_for_slot()
+            with urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if api_cache is not None:
+                api_cache.set("nominatim-reverse", cache_params, payload)
+            if isinstance(payload, dict):
+                return payload
+            return {}
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                error_payload: Any = json.loads(body)
+            except json.JSONDecodeError:
+                error_payload = {"error_body": body}
+
+            if api_cache is not None:
+                api_cache.set("nominatim-reverse", cache_params, error_payload)
+
+            if attempt < retries:
+                time.sleep(0.4 * (2 ** (attempt - 1)))
+                continue
+            return {}
+        except URLError:
+            if attempt < retries:
+                time.sleep(0.4 * (2 ** (attempt - 1)))
+                continue
+            return {}
 
 
 def _parse_opencode_json(stdout: str) -> dict[str, Any] | None:
@@ -537,6 +933,119 @@ def select_highlight_labels(
     return selected or fallback
 
 
+def _looks_generic_label(candidate: dict[str, Any]) -> bool:
+    label = str(candidate.get("label") or "").lower()
+    category = str(candidate.get("category") or "").lower()
+    candidate_type = str(candidate.get("type") or "").lower()
+
+    bad_terms = ["timezone", "america/", "road", "street", "highway", "county", "borough", "region"]
+    if any(term in label for term in bad_terms):
+        return True
+
+    admin_types = {"administrative", "boundary", "postcode"}
+    if category in admin_types or candidate_type in admin_types:
+        return True
+
+    return False
+
+
+def _fallback_best_label(normalized_candidates: list[dict[str, Any]]) -> str | None:
+    if not normalized_candidates:
+        return None
+
+    def score(candidate: dict[str, Any]) -> float:
+        importance = float(candidate.get("importance_norm") or 0.0)
+        place_rank = float(candidate.get("place_rank_norm") or 0.0)
+        proximity = float(candidate.get("proximity_norm") or 0.0)
+        generic_penalty = 0.4 if _looks_generic_label(candidate) else 0.0
+        return (0.50 * importance) + (0.30 * place_rank) + (0.20 * proximity) - generic_penalty
+
+    best = max(normalized_candidates, key=score)
+    label = best.get("label")
+    return label if isinstance(label, str) and label.strip() else None
+
+
+def choose_best_label_from_candidates(
+    candidates: list[dict[str, Any]],
+    opencode_timeout_sec: int,
+    opencode_model: str | None,
+) -> str | None:
+    if not candidates:
+        return None
+
+    cleaned: list[dict[str, Any]] = []
+    for candidate in candidates:
+        label = candidate.get("label")
+        if isinstance(label, str) and label.strip():
+            cleaned.append(dict(candidate))
+
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        only_candidate = cleaned[0]
+        only = only_candidate.get("label")
+        if not isinstance(only, str):
+            return None
+        if _looks_generic_label(only_candidate):
+            return None
+        if _is_rejected_label(
+            only,
+            category=str(only_candidate.get("category") or ""),
+            candidate_type=str(only_candidate.get("type") or ""),
+        ):
+            return None
+        return only
+
+    normalized_candidates = normalize_candidate_metrics(cleaned)
+    fallback = _fallback_best_label(normalized_candidates)
+    if shutil.which("opencode") is None:
+        return fallback
+
+    prompt = (
+        "Choose exactly one best folder tag candidate for travel highlights. "
+        "Prefer globally recognizable and specific POI/landmark/natural attractions. "
+        "Avoid generic admin/road/timezone-like names. "
+        "Use normalized metrics to compare candidates across sources. "
+        "Return ONLY JSON with schema {\"label\": string} and the label MUST be one from the provided candidates. "
+        f"Candidates with complete metadata: {json.dumps(normalized_candidates, ensure_ascii=True)}"
+    )
+
+    command = ["opencode"]
+    if opencode_model:
+        command.extend(["-m", opencode_model])
+    command.extend(["run", prompt])
+
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=opencode_timeout_sec,
+        )
+    except Exception:  # noqa: BLE001
+        return fallback
+
+    if result.returncode != 0:
+        return fallback
+
+    payload = _parse_opencode_json(result.stdout)
+    if not payload:
+        return fallback
+
+    raw_label = payload.get("label")
+    if not isinstance(raw_label, str):
+        return fallback
+
+    picked_key = raw_label.strip().casefold()
+    for candidate in normalized_candidates:
+        label = candidate.get("label")
+        if isinstance(label, str) and label.casefold() == picked_key:
+            return label
+
+    return fallback
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Append itinerary POI labels to a media folder name")
     parser.add_argument("folder", help="Path to media folder")
@@ -572,6 +1081,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model name passed to opencode -m (defaults to OPENCODE_MODEL)",
     )
     parser.add_argument(
+        "--use-nominatim-reverse",
+        action="store_true",
+        help="Use Nominatim reverse geocoding first for cleaner place labels",
+    )
+    parser.add_argument("--nominatim-zoom", type=int, default=18, help="Nominatim reverse zoom level (0-18)")
+    parser.add_argument(
+        "--nominatim-layer",
+        default="poi,natural,manmade",
+        help="Nominatim reverse layer restriction",
+    )
+    parser.add_argument(
+        "--use-dual-source",
+        action="store_true",
+        help="Query Nominatim reverse and LocationIQ nearby, then choose the better label",
+    )
+    parser.add_argument(
+        "--nominatim-requests-per-second",
+        type=float,
+        default=1.0,
+        help="Nominatim request rate; policy maximum is 1.0",
+    )
+    parser.add_argument(
+        "--locationiq-requests-per-second",
+        type=float,
+        default=float(os.getenv("LOCATIONIQ_REQUESTS_PER_SECOND", "1.0")),
+        help="Throttle for LocationIQ requests per second",
+    )
+    parser.add_argument(
+        "--cache-file",
+        default=str(default_cache_path()),
+        help="Local API cache file path for Nominatim and LocationIQ responses",
+    )
+    parser.add_argument(
         "--use-local-agent-compaction",
         action="store_true",
         help="Use local coding agent CLI (opencode/claude/codex) to compact long folder names",
@@ -597,9 +1139,82 @@ def _assign_labels(
     tag: str,
     radius: int,
     region: str,
+    use_nominatim_reverse: bool,
+    use_dual_source: bool,
+    opencode_timeout_sec: int,
+    opencode_model: str | None,
+    locationiq_requests_per_second: float,
+    nominatim_zoom: int,
+    nominatim_layer: str,
+    nominatim_requests_per_second: float = 1.0,
+    api_cache: LocalApiCache | None = None,
 ) -> None:
+    locationiq_rate_limiter = LocationIQRateLimiter(locationiq_requests_per_second)
+    nominatim_rate_limiter = LocationIQRateLimiter(min(max(nominatim_requests_per_second, 0.1), 1.0))
+
     for location_set in sets:
         centroid_lat, centroid_lon = _cluster_centroid(location_set)
+        if use_dual_source:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                nominatim_future = executor.submit(
+                    fetch_nominatim_reverse,
+                    centroid_lat,
+                    centroid_lon,
+                    nominatim_zoom,
+                    nominatim_layer,
+                    2,
+                    nominatim_rate_limiter,
+                    api_cache,
+                )
+                nearby_future = executor.submit(
+                    fetch_nearby_poi,
+                    api_key,
+                    centroid_lat,
+                    centroid_lon,
+                    tag,
+                    radius,
+                    region,
+                    3,
+                    locationiq_rate_limiter,
+                    api_cache,
+                )
+
+                try:
+                    reverse_payload = nominatim_future.result()
+                except RuntimeError:
+                    reverse_payload = {}
+
+                try:
+                    nearby_results = nearby_future.result()
+                except RuntimeError:
+                    nearby_results = []
+
+            combined_candidates = build_locationiq_candidates(nearby_results, centroid_lat, centroid_lon)
+            combined_candidates.extend(build_nominatim_candidates(reverse_payload, centroid_lat, centroid_lon))
+
+            best_label = choose_best_label_from_candidates(
+                combined_candidates,
+                opencode_timeout_sec=opencode_timeout_sec,
+                opencode_model=opencode_model,
+            )
+            fallback_label = choose_nominatim_label(reverse_payload) or choose_preferred_label(nearby_results)
+            location_set.label = best_label or fallback_label or "UNKNOWN_LOCATION"
+            continue
+
+        if use_nominatim_reverse:
+            reverse_payload = fetch_nominatim_reverse(
+                centroid_lat,
+                centroid_lon,
+                nominatim_zoom,
+                nominatim_layer,
+                nominatim_rate_limiter=nominatim_rate_limiter,
+                api_cache=api_cache,
+            )
+            reverse_label = choose_nominatim_label(reverse_payload)
+            if reverse_label:
+                location_set.label = reverse_label
+                continue
+
         try:
             poi_results = fetch_nearby_poi(
                 api_key=api_key,
@@ -608,6 +1223,8 @@ def _assign_labels(
                 tag=tag,
                 radius=radius,
                 region=region,
+                locationiq_rate_limiter=locationiq_rate_limiter,
+                api_cache=api_cache,
             )
         except RuntimeError:
             poi_results = []
@@ -631,6 +1248,10 @@ def main() -> int:
         print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
         return 2
 
+    if args.nominatim_requests_per_second > 1.0:
+        print("Nominatim policy requires <= 1 request per second.", file=sys.stderr)
+        return 2
+
     points = extract_media_points(folder)
     if not points:
         print("No GPS-bearing media found in folder.", file=sys.stderr)
@@ -639,7 +1260,23 @@ def main() -> int:
     seed = args.seed or folder.name
     sampled = sample_points(points, ratio=args.ratio, seed=seed)
     sets = cluster_points(sampled, threshold_m=args.event_distance_m)
-    _assign_labels(sets, api_key=args.key, tag=args.tag, radius=args.radius, region=args.region)
+    api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve())
+    _assign_labels(
+        sets,
+        api_key=args.key,
+        tag=args.tag,
+        radius=args.radius,
+        region=args.region,
+        use_nominatim_reverse=args.use_nominatim_reverse,
+        use_dual_source=args.use_dual_source,
+        opencode_timeout_sec=args.opencode_timeout_sec,
+        opencode_model=args.opencode_model,
+        locationiq_requests_per_second=args.locationiq_requests_per_second,
+        nominatim_zoom=args.nominatim_zoom,
+        nominatim_layer=args.nominatim_layer,
+        nominatim_requests_per_second=args.nominatim_requests_per_second,
+        api_cache=api_cache,
+    )
 
     ordered_labels = significant_labels_in_itinerary_order(sets, max_tags=args.max_tags)
     if len(sets) > args.max_tags:
