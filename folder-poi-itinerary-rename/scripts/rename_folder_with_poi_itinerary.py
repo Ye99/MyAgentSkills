@@ -28,7 +28,6 @@ from urllib.request import Request, urlopen
 
 MAX_FOLDER_NAME_LEN = 120
 DATE_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}(?:_|$)")
-YEAR_NAME_RE = re.compile(r"^\d{4}$")
 DATE_NAME_RE = re.compile(r"^(\d{4})_(\d{2})_(\d{2})$")
 APP_USER_AGENT = "Lookup_POI_withlocalcache"
 
@@ -49,6 +48,7 @@ class MediaPoint:
 class LocationSet:
     points: list[MediaPoint]
     label: str | None = None
+    top_candidates: list[dict[str, Any]] | None = None
 
 
 class LocationIQRateLimiter:
@@ -612,12 +612,31 @@ def extract_base_date_name(folder_name: str) -> str:
 
 
 def is_supported_date_folder_path(folder: Path) -> bool:
-    match = DATE_NAME_RE.match(folder.name)
-    if not match:
-        return False
+    return bool(DATE_NAME_RE.match(folder.name))
 
-    parent_name = folder.parent.name
-    return bool(YEAR_NAME_RE.match(parent_name) and parent_name == match.group(1))
+
+def _is_already_landmark_named_folder_name(folder_name: str) -> bool:
+    return bool(DATE_FOLDER_RE.match(folder_name) and not DATE_NAME_RE.match(folder_name))
+
+
+def discover_day_folders(root_path: Path) -> list[dict[str, str]]:
+    discovered: list[dict[str, str]] = []
+
+    for current_root, dirnames, _ in os.walk(root_path, topdown=True):
+        kept: list[str] = []
+        for dirname in dirnames:
+            child = Path(current_root) / dirname
+            if DATE_NAME_RE.match(dirname):
+                discovered.append({"folder_path": str(child), "status": "eligible-date-folder"})
+                continue
+            if _is_already_landmark_named_folder_name(dirname):
+                discovered.append({"folder_path": str(child), "status": "already-landmark-named"})
+                continue
+            kept.append(dirname)
+        dirnames[:] = kept
+
+    discovered.sort(key=lambda entry: entry["folder_path"])
+    return discovered
 
 
 def find_available_local_agent() -> str | None:
@@ -887,6 +906,7 @@ def consolidate_itinerary_landmark_names(
         "Preserve itinerary order from the original list. "
         "If two labels are from different countries or distant regions, do not drop one as redundant. "
         "When location set count is greater than max total landmark names, trim from the smallest location sets first. "
+        "Each location set may include runner_up_candidates; if you drop a set's primary label as redundant, you MAY substitute one of its runner-ups instead of dropping the set entirely. "
         "Return ONLY JSON with schema "
         '{"final_landmark_names":[string]}. '
         f"Max total landmark names: {max_landmark_names}. "
@@ -922,16 +942,48 @@ def consolidate_itinerary_landmark_names(
     if not requested:
         return fallback
 
-    valid_by_key = {label.casefold(): label for label in deduped}
+    valid_by_key: dict[str, str] = {label.casefold(): label for label in deduped}
+    label_order: dict[str, int] = {label.casefold(): idx for idx, label in enumerate(deduped)}
+    runner_up_alias_to_primary: dict[str, str] = {}
+
+    if location_set_members:
+        for member in location_set_members:
+            primary = normalize_label(str(member.get("landmark_name") or ""))
+            primary_key = primary.casefold()
+            if primary_key == "unknownlocation":
+                continue
+            primary_idx = label_order.get(primary_key)
+            if primary_idx is None:
+                continue
+            raw_primary_count = member.get("primary_candidate_count", 0)
+            try:
+                primary_candidate_count = int(raw_primary_count)
+            except (TypeError, ValueError):
+                primary_candidate_count = 0
+            primary_locked = primary_candidate_count >= 2
+            for runner_up_raw in member.get("runner_up_candidates", []):
+                normalized = normalize_label(runner_up_raw)
+                if not normalized or is_low_signal_label(normalized):
+                    continue
+                key = normalized.casefold()
+                if primary_locked:
+                    runner_up_alias_to_primary[key] = primary_key
+                    continue
+                if key not in valid_by_key:
+                    valid_by_key[key] = normalized
+                    label_order[key] = primary_idx
+
     selected_keys: set[str] = set()
     for landmark_name in requested:
-        match = valid_by_key.get(landmark_name.casefold())
-        if match:
-            selected_keys.add(match.casefold())
+        key = landmark_name.casefold()
+        key = runner_up_alias_to_primary.get(key, key)
+        if key in valid_by_key and key not in selected_keys:
+            selected_keys.add(key)
         if len(selected_keys) >= max_landmark_names:
             break
 
-    selected = [label for label in deduped if label.casefold() in selected_keys][:max_landmark_names]
+    ordered_keys = sorted(selected_keys, key=lambda k: label_order.get(k, len(deduped)))
+    selected = [valid_by_key[k] for k in ordered_keys][:max_landmark_names]
     if not selected:
         return fallback
 
@@ -971,13 +1023,30 @@ def finalize_landmark_names(
     for idx, location_set in enumerate(ordered, start=1):
         if not location_set.label:
             continue
-        location_set_members.append(
-            {
-                "landmark_name": normalize_label(location_set.label),
-                "set_member_count": len(location_set.points),
-                "itinerary_order": idx,
-            }
-        )
+        member: dict[str, Any] = {
+            "landmark_name": normalize_label(location_set.label),
+            "set_member_count": len(location_set.points),
+            "itinerary_order": idx,
+        }
+        if location_set.top_candidates:
+            primary_key = normalize_label(location_set.label).casefold()
+            runner_ups: list[str] = []
+            primary_candidate_count = 0
+            for candidate in location_set.top_candidates:
+                c_label = candidate.get("label")
+                if not isinstance(c_label, str):
+                    continue
+                normalized = normalize_label(c_label)
+                if normalized and normalized.casefold() == primary_key:
+                    primary_candidate_count += 1
+                    continue
+                if normalized and not is_low_signal_label(normalized):
+                    runner_ups.append(c_label)
+            if runner_ups:
+                member["runner_up_candidates"] = runner_ups[:2]
+            if primary_candidate_count:
+                member["primary_candidate_count"] = primary_candidate_count
+        location_set_members.append(member)
     return consolidate_itinerary_landmark_names(
         ordered_labels,
         max_landmark_names=max_landmark_names,
@@ -1026,8 +1095,6 @@ def _fallback_best_label(normalized_candidates: list[dict[str, Any]]) -> str | N
 
 def choose_best_label_from_candidates(
     candidates: list[dict[str, Any]],
-    opencode_timeout_sec: int,
-    opencode_model: str | None,
 ) -> str | None:
     if not candidates:
         return None
@@ -1056,55 +1123,37 @@ def choose_best_label_from_candidates(
         return only
 
     normalized_candidates = normalize_candidate_metrics(cleaned)
-    fallback = _fallback_best_label(normalized_candidates)
-    if shutil.which("opencode") is None:
-        return fallback
+    return _fallback_best_label(normalized_candidates)
 
-    prompt = (
-        "Return exactly one best-matching travel destination name. Give preference to widely recognizable landmarks or natural attractions. "
-        "Prefer specific names over generic names: 'Statue of Liberty Information Center' is good, plain 'Information Center' is too generic. "
-        "Avoid generic admin/road/timezone-like names. "
-        "Use normalized metrics to compare candidates across sources. "
-        "Return ONLY JSON with schema {\"label\": string} and the label MUST be one from the provided candidates. "
-        f"Candidates with complete metadata: {json.dumps(normalized_candidates, ensure_ascii=True)}"
-    )
 
-    command = ["opencode"]
-    if opencode_model:
-        command.extend(["-m", opencode_model])
-    command.extend(["run", prompt])
+def select_top_candidates(
+    candidates: list[dict[str, Any]],
+    top_n: int = 3,
+) -> list[dict[str, Any]]:
+    """Return top N candidates by deterministic scoring."""
+    if not candidates:
+        return []
 
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=opencode_timeout_sec,
-        )
-    except Exception:  # noqa: BLE001
-        return fallback
-
-    if result.returncode != 0:
-        return fallback
-
-    payload = _parse_opencode_json(result.stdout)
-    if not payload:
-        return fallback
-
-    raw_label = payload.get("label")
-    if not isinstance(raw_label, str):
-        return fallback
-
-    picked_key = raw_label.strip().casefold()
-    for candidate in normalized_candidates:
+    cleaned: list[dict[str, Any]] = []
+    for candidate in candidates:
         label = candidate.get("label")
-        if isinstance(label, str) and label.casefold() == picked_key:
-            if not normalize_label(label):
-                return fallback
-            return label
+        if isinstance(label, str) and label.strip():
+            cleaned.append(dict(candidate))
 
-    return fallback
+    if not cleaned:
+        return []
+
+    normalized = normalize_candidate_metrics(cleaned)
+
+    def score(c: dict[str, Any]) -> float:
+        importance = float(c.get("importance_norm") or 0.0)
+        place_rank = float(c.get("place_rank_norm") or 0.0)
+        proximity = float(c.get("proximity_norm") or 0.0)
+        generic_penalty = 0.4 if _looks_generic_label(c) else 0.0
+        return (0.50 * importance) + (0.30 * place_rank) + (0.20 * proximity) - generic_penalty
+
+    ranked = sorted(normalized, key=score, reverse=True)
+    return ranked[:top_n]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1170,6 +1219,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use local coding agent CLI (opencode/claude/codex) to compact long folder names",
     )
+    parser.add_argument(
+        "--report-json",
+        default="folder_poi_itinerary_rename_report.json",
+        help="JSON report output path",
+    )
     parser.add_argument("--apply", action="store_true", help="Apply folder rename")
     return parser
 
@@ -1191,8 +1245,6 @@ def _assign_labels(
     landmark_filter: str,
     radius: int,
     region: str,
-    opencode_timeout_sec: int,
-    opencode_model: str | None,
     locationiq_requests_per_second: float,
     nominatim_zoom: int,
     nominatim_layer: str,
@@ -1240,90 +1292,251 @@ def _assign_labels(
         combined_candidates = build_locationiq_candidates(nearby_results, centroid_lat, centroid_lon)
         combined_candidates.extend(build_nominatim_candidates(reverse_payload, centroid_lat, centroid_lon))
 
-        best_label = choose_best_label_from_candidates(
-            combined_candidates,
-            opencode_timeout_sec=opencode_timeout_sec,
-            opencode_model=opencode_model,
-        )
+        best_label = choose_best_label_from_candidates(combined_candidates)
         location_set.label = best_label or "UNKNOWN_LOCATION"
+        location_set.top_candidates = select_top_candidates(combined_candidates)
+
+
+def process_single_folder(
+    folder: Path,
+    args: argparse.Namespace,
+    api_cache: LocalApiCache | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "folder_path": str(folder),
+        "status": "error",
+    }
+
+    try:
+        points = extract_media_points(folder)
+        result["gps_bearing_files"] = len(points)
+        if not points:
+            result["status"] = "skipped-no-gps-media"
+            return result
+
+        seed = args.seed or folder.name
+        sampled = sample_points(points, ratio=args.ratio, seed=seed)
+        sets = cluster_points(sampled, threshold_m=args.event_distance_m)
+        _assign_labels(
+            sets,
+            api_key=args.key,
+            landmark_filter=args.landmark_filter,
+            radius=args.radius,
+            region=args.region,
+            locationiq_requests_per_second=args.locationiq_requests_per_second,
+            nominatim_zoom=args.nominatim_zoom,
+            nominatim_layer=args.nominatim_layer,
+            nominatim_requests_per_second=args.nominatim_requests_per_second,
+            api_cache=api_cache,
+        )
+
+        selected_labels = finalize_landmark_names(
+            sets,
+            max_landmark_names=args.max_landmark_names,
+            opencode_timeout_sec=args.opencode_timeout_sec,
+            opencode_model=args.opencode_model,
+        )
+        deduped_landmarks = dedupe_labels(selected_labels)
+        base_name = extract_base_date_name(folder.name)
+        target_name = build_target_name(
+            base_name,
+            selected_labels,
+            use_local_agent_compaction=args.use_local_agent_compaction,
+        )
+
+        result.update(
+            {
+                "sampled_files": len(sampled),
+                "location_sets": len(sets),
+                "ordered_landmark_names": deduped_landmarks,
+                "base_name": base_name,
+                "target_name": target_name,
+            }
+        )
+
+        if target_name == folder.name:
+            result["status"] = "skipped-no-landmark-name-proposed"
+            return result
+
+        destination = _unique_destination(folder.with_name(target_name))
+        result["proposed_destination"] = str(destination)
+        result["collision_suffix_used"] = destination.name != target_name
+
+        if not args.apply:
+            result["status"] = "planned-rename"
+            return result
+
+        folder.rename(destination)
+        result["status"] = "renamed"
+        result["applied_destination"] = str(destination)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["status"] = "error"
+        result["error"] = str(exc)
+        return result
+
+
+def build_rename_report(
+    root_path: Path,
+    apply_mode: bool,
+    folder_results: list[dict[str, Any]],
+    discovered_folders: list[dict[str, str]],
+    started_at: datetime,
+    finished_at: datetime,
+) -> dict[str, Any]:
+    def _iso_utc(value: datetime) -> str:
+        utc_value = value.astimezone(timezone.utc).replace(microsecond=0)
+        return utc_value.isoformat().replace("+00:00", "Z")
+
+    def _count(entries: list[dict[str, Any]], status: str) -> int:
+        return sum(1 for entry in entries if entry.get("status") == status)
+
+    no_landmark_paths = sorted(
+        str(entry["folder_path"])
+        for entry in folder_results
+        if entry.get("status") == "skipped-no-landmark-name-proposed"
+    )
+    already_named_paths = sorted(
+        str(entry["folder_path"])
+        for entry in folder_results
+        if entry.get("status") == "skipped-already-landmark-named"
+    )
+    error_paths = sorted(
+        str(entry["folder_path"])
+        for entry in folder_results
+        if entry.get("status") == "error"
+    )
+
+    summary = {
+        "candidate_folder_count": len(discovered_folders),
+        "eligible_date_folder_count": _count(discovered_folders, "eligible-date-folder"),
+        "processed_folder_count": len(folder_results),
+        "planned_rename_count": _count(folder_results, "planned-rename"),
+        "renamed_count": _count(folder_results, "renamed"),
+        "already_landmark_named_count": _count(folder_results, "skipped-already-landmark-named"),
+        "no_landmark_name_proposed_count": _count(folder_results, "skipped-no-landmark-name-proposed"),
+        "no_gps_media_count": _count(folder_results, "skipped-no-gps-media"),
+        "rename_failed_count": _count(folder_results, "error"),
+    }
+
+    report = {
+        "root_path": str(root_path),
+        "mode": "apply" if apply_mode else "dry-run",
+        "started_at": _iso_utc(started_at),
+        "finished_at": _iso_utc(finished_at),
+        "duration_seconds": round(max(0.0, (finished_at - started_at).total_seconds()), 3),
+        "summary": summary,
+        "no_landmark_name_proposed_paths": no_landmark_paths,
+        "already_landmark_named_paths": already_named_paths,
+        "error_paths": error_paths,
+        "folders": sorted(folder_results, key=lambda entry: str(entry.get("folder_path") or "")),
+    }
+    return report
+
+
+def _write_report(report_path: Path, report: dict[str, Any]) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    folder = Path(args.folder).expanduser().resolve()
-    if not folder.exists() or not folder.is_dir():
-        print(f"Folder not found: {folder}", file=sys.stderr)
-        return 2
+    input_path = Path(args.folder).expanduser().resolve()
+    report_path = Path(args.report_json).expanduser().resolve()
+    started_at = datetime.now(timezone.utc)
 
-    if not is_supported_date_folder_path(folder):
-        print("Skipping folder: expected path format YYYY/YYYY_MM_DD.")
-        return 0
-
-    if not args.key:
-        print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
+    if not input_path.exists() or not input_path.is_dir():
+        print(f"Folder not found: {input_path}", file=sys.stderr)
         return 2
 
     if args.nominatim_requests_per_second > 1.0:
         print("Nominatim policy requires <= 1 request per second.", file=sys.stderr)
         return 2
 
-    points = extract_media_points(folder)
-    if not points:
-        print("No GPS-bearing media found in folder.", file=sys.stderr)
+    single_folder_input = is_supported_date_folder_path(input_path)
+    if single_folder_input:
+        discovered_folders = [{"folder_path": str(input_path), "status": "eligible-date-folder"}]
+    elif _is_already_landmark_named_folder_name(input_path.name):
+        discovered_folders = [{"folder_path": str(input_path), "status": "already-landmark-named"}]
+    else:
+        discovered_folders = discover_day_folders(input_path)
+
+    folder_results: list[dict[str, Any]] = []
+    eligible_folders: list[Path] = []
+
+    for entry in discovered_folders:
+        folder_path = Path(entry["folder_path"])
+        status = entry["status"]
+        if status == "already-landmark-named":
+            folder_results.append(
+                {
+                    "folder_path": str(folder_path),
+                    "status": "skipped-already-landmark-named",
+                    "base_name": extract_base_date_name(folder_path.name),
+                    "target_name": folder_path.name,
+                }
+            )
+            continue
+
+        if status == "eligible-date-folder":
+            eligible_folders.append(folder_path)
+
+    if eligible_folders and not args.key:
+        for folder in eligible_folders:
+            folder_results.append(
+                {
+                    "folder_path": str(folder),
+                    "status": "error",
+                    "error": "Missing API key. Use --key or LOCATIONIQ_API_KEY.",
+                }
+            )
+
+        finished_at = datetime.now(timezone.utc)
+        report = build_rename_report(
+            root_path=input_path,
+            apply_mode=args.apply,
+            folder_results=folder_results,
+            discovered_folders=discovered_folders,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        _write_report(report_path, report)
+        print(f"Wrote report: {report_path}")
+        print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
+        return 2
+
+    api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve()) if eligible_folders else None
+
+    for folder in eligible_folders:
+        folder_results.append(process_single_folder(folder, args, api_cache))
+
+    finished_at = datetime.now(timezone.utc)
+    report = build_rename_report(
+        root_path=input_path,
+        apply_mode=args.apply,
+        folder_results=folder_results,
+        discovered_folders=discovered_folders,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+    _write_report(report_path, report)
+
+    summary = report["summary"]
+    print(f"Wrote report: {report_path}")
+    print(f"Candidate folders: {summary['candidate_folder_count']}")
+    print(f"Planned renames: {summary['planned_rename_count']}")
+    print(f"Renamed folders: {summary['renamed_count']}")
+    print(f"Already landmark named: {summary['already_landmark_named_count']}")
+    print(f"No landmark proposed: {summary['no_landmark_name_proposed_count']}")
+    print(f"Folders with no GPS media: {summary['no_gps_media_count']}")
+    print(f"Rename failures: {summary['rename_failed_count']}")
+
+    if single_folder_input and len(folder_results) == 1 and folder_results[0].get("status") == "skipped-no-gps-media":
         return 1
-
-    seed = args.seed or folder.name
-    sampled = sample_points(points, ratio=args.ratio, seed=seed)
-    sets = cluster_points(sampled, threshold_m=args.event_distance_m)
-    api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve())
-    _assign_labels(
-        sets,
-        api_key=args.key,
-        landmark_filter=args.landmark_filter,
-        radius=args.radius,
-        region=args.region,
-        opencode_timeout_sec=args.opencode_timeout_sec,
-        opencode_model=args.opencode_model,
-        locationiq_requests_per_second=args.locationiq_requests_per_second,
-        nominatim_zoom=args.nominatim_zoom,
-        nominatim_layer=args.nominatim_layer,
-        nominatim_requests_per_second=args.nominatim_requests_per_second,
-        api_cache=api_cache,
-    )
-
-    selected_labels = finalize_landmark_names(
-        sets,
-        max_landmark_names=args.max_landmark_names,
-        opencode_timeout_sec=args.opencode_timeout_sec,
-        opencode_model=args.opencode_model,
-    )
-    base_name = extract_base_date_name(folder.name)
-    target_name = build_target_name(
-        base_name,
-        selected_labels,
-        use_local_agent_compaction=args.use_local_agent_compaction,
-    )
-
-    print(f"GPS-bearing files: {len(points)}")
-    print(f"Sampled files: {len(sampled)}")
-    print(f"Location sets: {len(sets)}")
-    print(f"Ordered landmark names: {', '.join(dedupe_labels(selected_labels))}")
-
-    if target_name == folder.name:
-        print("No rename needed.")
-        return 0
-
-    destination = _unique_destination(folder.with_name(target_name))
-    print(f"Proposed name: {destination.name}")
-
-    if not args.apply:
-        print("Dry run only. Use --apply to rename.")
-        return 0
-
-    folder.rename(destination)
-    print(f"Renamed to: {destination}")
+    if summary["rename_failed_count"] > 0:
+        return 1
     return 0
 
 
