@@ -1170,21 +1170,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("OPENCODE_MODEL"),
         help="Model name passed to opencode -m (defaults to OPENCODE_MODEL)",
     )
-    parser.add_argument(
-        "--use-nominatim-reverse",
-        action="store_true",
-        help="Use Nominatim reverse geocoding first for cleaner place labels",
-    )
     parser.add_argument("--nominatim-zoom", type=int, default=18, help="Nominatim reverse zoom level (0-18)")
     parser.add_argument(
         "--nominatim-layer",
         default="poi,natural,manmade",
         help="Nominatim reverse layer restriction",
-    )
-    parser.add_argument(
-        "--use-dual-source",
-        action="store_true",
-        help="Query Nominatim reverse and LocationIQ nearby, then choose the better label",
     )
     parser.add_argument(
         "--nominatim-requests-per-second",
@@ -1229,8 +1219,6 @@ def _assign_labels(
     landmark_filter: str,
     radius: int,
     region: str,
-    use_nominatim_reverse: bool,
-    use_dual_source: bool,
     opencode_timeout_sec: int,
     opencode_model: str | None,
     locationiq_requests_per_second: float,
@@ -1244,83 +1232,48 @@ def _assign_labels(
 
     for location_set in sets:
         centroid_lat, centroid_lon = _cluster_centroid(location_set)
-        if use_dual_source:
-            # IMPORTANT: grouping integrity is per location set only.
-            # We merge LocationIQ and Nominatim candidates for this centroid,
-            # choose one label, then move to the next set. No cross-set mixing.
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                nominatim_future = executor.submit(
-                    fetch_nominatim_reverse,
-                    centroid_lat,
-                    centroid_lon,
-                    nominatim_zoom,
-                    nominatim_layer,
-                    2,
-                    nominatim_rate_limiter,
-                    api_cache,
-                )
-                nearby_future = executor.submit(
-                    fetch_nearby_poi,
-                    api_key,
-                    centroid_lat,
-                    centroid_lon,
-                    landmark_filter,
-                    radius,
-                    region,
-                    3,
-                    locationiq_rate_limiter,
-                    api_cache,
-                )
-
-                try:
-                    reverse_payload = nominatim_future.result()
-                except RuntimeError:
-                    reverse_payload = {}
-
-                try:
-                    nearby_results = nearby_future.result()
-                except RuntimeError:
-                    nearby_results = []
-
-            combined_candidates = build_locationiq_candidates(nearby_results, centroid_lat, centroid_lon)
-            combined_candidates.extend(build_nominatim_candidates(reverse_payload, centroid_lat, centroid_lon))
-
-            best_label = choose_best_label_from_candidates(
-                combined_candidates,
-                opencode_timeout_sec=opencode_timeout_sec,
-                opencode_model=opencode_model,
-            )
-            location_set.label = best_label or "UNKNOWN_LOCATION"
-            continue
-
-        if use_nominatim_reverse:
-            reverse_payload = fetch_nominatim_reverse(
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            nominatim_future = executor.submit(
+                fetch_nominatim_reverse,
                 centroid_lat,
                 centroid_lon,
                 nominatim_zoom,
                 nominatim_layer,
-                nominatim_rate_limiter=nominatim_rate_limiter,
-                api_cache=api_cache,
+                2,
+                nominatim_rate_limiter,
+                api_cache,
             )
-            reverse_label = choose_nominatim_label(reverse_payload)
-            if reverse_label:
-                location_set.label = reverse_label
-                continue
+            nearby_future = executor.submit(
+                fetch_nearby_poi,
+                api_key,
+                centroid_lat,
+                centroid_lon,
+                landmark_filter,
+                radius,
+                region,
+                3,
+                locationiq_rate_limiter,
+                api_cache,
+            )
+            try:
+                reverse_payload = nominatim_future.result()
+            except RuntimeError:
+                reverse_payload = {}
 
-        try:
-            poi_results = fetch_nearby_poi(
-                api_key=api_key,
-                lat=centroid_lat,
-                lon=centroid_lon,
-                landmark_filter=landmark_filter,
-                radius=radius,
-                region=region,
-                locationiq_rate_limiter=locationiq_rate_limiter,
-                api_cache=api_cache,
-            )
-        except RuntimeError:
-            poi_results = []
-        location_set.label = choose_preferred_label(poi_results) or "UNKNOWN_LOCATION"
+            try:
+                nearby_results = nearby_future.result()
+            except RuntimeError:
+                nearby_results = []
+
+        combined_candidates = build_locationiq_candidates(nearby_results, centroid_lat, centroid_lon)
+        combined_candidates.extend(build_nominatim_candidates(reverse_payload, centroid_lat, centroid_lon))
+
+        best_label = choose_best_label_from_candidates(
+            combined_candidates,
+            opencode_timeout_sec=opencode_timeout_sec,
+            opencode_model=opencode_model,
+        )
+        location_set.label = best_label or "UNKNOWN_LOCATION"
 
 
 def main() -> int:
@@ -1359,8 +1312,6 @@ def main() -> int:
         landmark_filter=args.landmark_filter,
         radius=args.radius,
         region=args.region,
-        use_nominatim_reverse=args.use_nominatim_reverse,
-        use_dual_source=args.use_dual_source,
         opencode_timeout_sec=args.opencode_timeout_sec,
         opencode_model=args.opencode_model,
         locationiq_requests_per_second=args.locationiq_requests_per_second,

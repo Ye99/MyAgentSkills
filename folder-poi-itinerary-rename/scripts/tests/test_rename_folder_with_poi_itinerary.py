@@ -211,7 +211,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(args.opencode_timeout_sec, 60)
         self.assertEqual(args.event_distance_m, 2000.0)
         self.assertEqual(args.opencode_model, os.getenv("OPENCODE_MODEL"))
-        self.assertFalse(args.use_nominatim_reverse)
         self.assertEqual(args.nominatim_zoom, 18)
         self.assertEqual(args.nominatim_layer, "poi,natural,manmade")
         self.assertEqual(args.nominatim_requests_per_second, 1.0)
@@ -222,6 +221,13 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         parser = mod.build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(["/tmp/2025/2025_07_02", "--max-tags", "5"])
+
+    def test_build_parser_rejects_removed_source_flags(self) -> None:
+        parser = mod.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025/2025_07_02", "--use-nominatim-reverse"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025/2025_07_02", "--use-dual-source"])
 
     def test_nominatim_user_agent_name(self) -> None:
         self.assertEqual(mod.APP_USER_AGENT, "Lookup_POI_withlocalcache")
@@ -575,7 +581,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
 
         self.assertEqual(selected, ["B", "C"])
 
-    def test_assign_labels_prefers_nominatim_when_enabled(self) -> None:
+    def test_assign_labels_prefers_nominatim_as_dual_source_fallback(self) -> None:
         sets = [
             mod.LocationSet(
                 points=[mod.MediaPoint("x.jpg", 64.027411, -16.975069, datetime(2025, 7, 10, 10, 0, 0))],
@@ -584,20 +590,19 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         ]
         with patch("rename_folder_with_poi_itinerary.fetch_nominatim_reverse", return_value={"name": "Svartifoss"}):
             with patch("rename_folder_with_poi_itinerary.fetch_nearby_poi", return_value=[{"name": "NoisyPoi"}]):
-                mod._assign_labels(
-                    sets,
-                    api_key="fake",
-                    landmark_filter="all",
-                    radius=1000,
-                    region="us1",
-                    use_nominatim_reverse=True,
-                    use_dual_source=False,
-                    opencode_timeout_sec=60,
-                    opencode_model="openai/gpt-4o-mini",
-                    locationiq_requests_per_second=1.0,
-                    nominatim_zoom=18,
-                    nominatim_layer="poi,natural,manmade",
-                )
+                with patch("rename_folder_with_poi_itinerary.choose_best_label_from_candidates", return_value="Svartifoss"):
+                    mod._assign_labels(
+                        sets,
+                        api_key="fake",
+                        landmark_filter="all",
+                        radius=1000,
+                        region="us1",
+                        opencode_timeout_sec=60,
+                        opencode_model="openai/gpt-4o-mini",
+                        locationiq_requests_per_second=1.0,
+                        nominatim_zoom=18,
+                        nominatim_layer="poi,natural,manmade",
+                    )
         self.assertEqual(sets[0].label, "Svartifoss")
 
     def test_normalize_candidate_metrics_scales_fields(self) -> None:
@@ -703,8 +708,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                         landmark_filter="all",
                         radius=1000,
                         region="us1",
-                        use_nominatim_reverse=True,
-                        use_dual_source=True,
                         opencode_timeout_sec=60,
                         opencode_model="openai/gpt-4o-mini",
                         locationiq_requests_per_second=1.0,
@@ -748,8 +751,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                         landmark_filter="all",
                         radius=1000,
                         region="us1",
-                        use_nominatim_reverse=False,
-                        use_dual_source=True,
                         opencode_timeout_sec=60,
                         opencode_model="openai/gpt-4o-mini",
                         locationiq_requests_per_second=1.0,
@@ -788,8 +789,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     landmark_filter="all",
                     radius=1000,
                     region="us1",
-                    use_nominatim_reverse=False,
-                    use_dual_source=True,
                     opencode_timeout_sec=60,
                     opencode_model="openai/gpt-4o-mini",
                     locationiq_requests_per_second=1.0,
@@ -824,8 +823,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     landmark_filter="all",
                     radius=1000,
                     region="us1",
-                    use_nominatim_reverse=False,
-                    use_dual_source=True,
                     opencode_timeout_sec=60,
                     opencode_model="openai/gpt-4o-mini",
                     locationiq_requests_per_second=1.0,
@@ -855,8 +852,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     landmark_filter="all",
                     radius=1000,
                     region="us1",
-                    use_nominatim_reverse=False,
-                    use_dual_source=True,
                     opencode_timeout_sec=60,
                     opencode_model="openai/gpt-4o-mini",
                     locationiq_requests_per_second=1.0,
@@ -883,8 +878,6 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     landmark_filter="all",
                     radius=1000,
                     region="us1",
-                    use_nominatim_reverse=False,
-                    use_dual_source=True,
                     opencode_timeout_sec=60,
                     opencode_model="openai/gpt-4o-mini",
                     locationiq_requests_per_second=1.0,
