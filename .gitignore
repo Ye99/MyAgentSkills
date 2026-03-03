@@ -2,3 +2,4 @@ superpowers
 __pycache__/
 .venv/
 .venv-*/
+folder-poi-itinerary-rename/scripts/cache/
