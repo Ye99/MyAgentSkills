@@ -262,7 +262,17 @@ def normalize_label(label: str) -> str:
     parts = re.findall(r"[A-Za-z0-9]+", ascii_label)
     if not parts:
         return ""
-    return "".join(part[:1].upper() + part[1:].lower() for part in parts)
+
+    normalized_parts: list[str] = []
+    for part in parts:
+        has_upper = any(ch.isupper() for ch in part)
+        has_lower = any(ch.islower() for ch in part)
+        if has_upper and has_lower:
+            normalized_parts.append(part[:1].upper() + part[1:])
+        else:
+            normalized_parts.append(part[:1].upper() + part[1:].lower())
+
+    return "".join(normalized_parts)
 
 
 def dedupe_labels(labels: list[str]) -> list[str]:
@@ -289,6 +299,23 @@ def is_low_signal_label(label: str) -> bool:
 def labels_in_itinerary_order(sets: list[LocationSet]) -> list[str]:
     ordered = sorted(sets, key=lambda location_set: min(p.timestamp for p in location_set.points))
     return [location_set.label for location_set in ordered if location_set.label]
+
+
+def significant_labels_in_itinerary_order(sets: list[LocationSet], max_tags: int) -> list[str]:
+    if max_tags <= 0:
+        return []
+
+    ordered = sorted(sets, key=lambda location_set: min(p.timestamp for p in location_set.points))
+    if len(ordered) <= max_tags:
+        return [location_set.label for location_set in ordered if location_set.label]
+
+    ranked = sorted(
+        ordered,
+        key=lambda location_set: (-len(location_set.points), min(p.timestamp for p in location_set.points)),
+    )
+    picked = ranked[:max_tags]
+    picked_ids = {id(location_set) for location_set in picked}
+    return [location_set.label for location_set in ordered if id(location_set) in picked_ids and location_set.label]
 
 
 def build_target_name(base_name: str, labels: list[str], use_local_agent_compaction: bool = False) -> str:
@@ -417,6 +444,142 @@ def fetch_nearby_poi(
             raise RuntimeError(f"LocationIQ network error: {exc.reason}") from exc
 
 
+def _parse_opencode_json(stdout: str) -> dict[str, Any] | None:
+    content = stdout.strip()
+    if not content:
+        return None
+
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_candidate_tags(payload: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    for key in ["primary_tags", "secondary_tags"]:
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        for entry in value:
+            if isinstance(entry, str) and entry.strip():
+                tags.append(entry.strip())
+    return tags
+
+
+def select_highlight_labels(
+    labels: list[str],
+    max_tags: int,
+    opencode_timeout_sec: int,
+    opencode_model: str | None,
+) -> list[str]:
+    if max_tags <= 0:
+        return []
+
+    deduped = dedupe_labels(labels)
+    if not deduped:
+        return []
+
+    fallback = deduped[:max_tags]
+    if shutil.which("opencode") is None:
+        return fallback
+
+    prompt = (
+        "You are selecting folder highlight tags from travel media events. "
+        "Return ONLY JSON with schema "
+        '{"primary_tags":[string],"secondary_tags":[string]}. '
+        "Rules: prefer globally recognizable and high-importance places, "
+        "avoid generic or low-signal places, and do not invent tags not in candidates. "
+        f"Max total tags: {max_tags}. "
+        f"Candidates in itinerary order: {json.dumps(deduped)}"
+    )
+
+    command = ["opencode"]
+    if opencode_model:
+        command.extend(["-m", opencode_model])
+    command.extend(["run", prompt])
+
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=opencode_timeout_sec,
+        )
+    except Exception:  # noqa: BLE001
+        return fallback
+
+    if result.returncode != 0:
+        return fallback
+
+    payload = _parse_opencode_json(result.stdout)
+    if payload is None:
+        return fallback
+
+    requested = dedupe_labels(_extract_candidate_tags(payload))
+    if not requested:
+        return fallback
+
+    valid_by_key = {label.casefold(): label for label in deduped}
+    selected_keys: set[str] = set()
+    for tag in requested:
+        match = valid_by_key.get(tag.casefold())
+        if match:
+            selected_keys.add(match.casefold())
+        if len(selected_keys) >= max_tags:
+            break
+
+    selected = [label for label in deduped if label.casefold() in selected_keys][:max_tags]
+    return selected or fallback
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Append itinerary POI labels to a media folder name")
+    parser.add_argument("folder", help="Path to media folder")
+    parser.add_argument("--key", default=os.getenv("LOCATIONIQ_API_KEY"), help="LocationIQ API key")
+    parser.add_argument("--ratio", type=float, default=0.6, help="Sampling ratio of GPS-bearing files")
+    parser.add_argument(
+        "--event-distance-m",
+        "--threshold-m",
+        dest="event_distance_m",
+        type=float,
+        default=2000.0,
+        help="Distance threshold for location sets in meters",
+    )
+    parser.add_argument("--tag", default="all", help="Nearby API tag filter")
+    parser.add_argument("--radius", type=int, default=1000, help="Nearby API search radius in meters")
+    parser.add_argument("--region", default="us1", choices=["us1", "eu1"], help="LocationIQ region")
+    parser.add_argument("--seed", default=None, help="Optional deterministic sampling seed")
+    parser.add_argument(
+        "--max-tags",
+        type=int,
+        default=8,
+        help="Maximum number of highlight tags to keep",
+    )
+    parser.add_argument(
+        "--opencode-timeout-sec",
+        type=int,
+        default=60,
+        help="Timeout in seconds for local opencode highlight selection",
+    )
+    parser.add_argument(
+        "--opencode-model",
+        default=os.getenv("OPENCODE_MODEL"),
+        help="Model name passed to opencode -m (defaults to OPENCODE_MODEL)",
+    )
+    parser.add_argument(
+        "--use-local-agent-compaction",
+        action="store_true",
+        help="Use local coding agent CLI (opencode/claude/codex) to compact long folder names",
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply folder rename")
+    return parser
+
+
 def _unique_destination(path: Path) -> Path:
     if not path.exists():
         return path
@@ -452,21 +615,7 @@ def _assign_labels(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Append itinerary POI labels to a media folder name")
-    parser.add_argument("folder", help="Path to media folder")
-    parser.add_argument("--key", default=os.getenv("LOCATIONIQ_API_KEY"), help="LocationIQ API key")
-    parser.add_argument("--ratio", type=float, default=0.6, help="Sampling ratio of GPS-bearing files")
-    parser.add_argument("--threshold-m", type=float, default=300.0, help="Distance threshold for location sets")
-    parser.add_argument("--tag", default="all", help="Nearby API tag filter")
-    parser.add_argument("--radius", type=int, default=1000, help="Nearby API search radius in meters")
-    parser.add_argument("--region", default="us1", choices=["us1", "eu1"], help="LocationIQ region")
-    parser.add_argument("--seed", default=None, help="Optional deterministic sampling seed")
-    parser.add_argument(
-        "--use-local-agent-compaction",
-        action="store_true",
-        help="Use local coding agent CLI (opencode/claude/codex) to compact long folder names",
-    )
-    parser.add_argument("--apply", action="store_true", help="Apply folder rename")
+    parser = build_parser()
     args = parser.parse_args()
 
     folder = Path(args.folder).expanduser().resolve()
@@ -489,21 +638,30 @@ def main() -> int:
 
     seed = args.seed or folder.name
     sampled = sample_points(points, ratio=args.ratio, seed=seed)
-    sets = cluster_points(sampled, threshold_m=args.threshold_m)
+    sets = cluster_points(sampled, threshold_m=args.event_distance_m)
     _assign_labels(sets, api_key=args.key, tag=args.tag, radius=args.radius, region=args.region)
 
-    ordered_labels = labels_in_itinerary_order(sets)
+    ordered_labels = significant_labels_in_itinerary_order(sets, max_tags=args.max_tags)
+    if len(sets) > args.max_tags:
+        selected_labels = ordered_labels
+    else:
+        selected_labels = select_highlight_labels(
+            ordered_labels,
+            max_tags=args.max_tags,
+            opencode_timeout_sec=args.opencode_timeout_sec,
+            opencode_model=args.opencode_model,
+        )
     base_name = extract_base_date_name(folder.name)
     target_name = build_target_name(
         base_name,
-        ordered_labels,
+        selected_labels,
         use_local_agent_compaction=args.use_local_agent_compaction,
     )
 
     print(f"GPS-bearing files: {len(points)}")
     print(f"Sampled files: {len(sampled)}")
     print(f"Location sets: {len(sets)}")
-    print(f"Ordered labels: {', '.join(dedupe_labels(ordered_labels))}")
+    print(f"Ordered labels: {', '.join(dedupe_labels(selected_labels))}")
 
     if target_name == folder.name:
         print("No rename needed.")
