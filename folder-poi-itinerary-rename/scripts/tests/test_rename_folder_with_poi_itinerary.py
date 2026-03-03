@@ -560,7 +560,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertIn("trim from the smallest location sets first", prompt)
         self.assertIn('"set_member_count": 3', prompt)
 
-    def test_consolidate_itinerary_labels_fallback_trims_smallest_sets_first(self) -> None:
+    def test_consolidate_itinerary_labels_fallback_preserves_itinerary_order_when_opencode_fails(self) -> None:
         labels = ["A", "B", "C"]
         members = [
             {"landmark_name": "A", "set_member_count": 1, "itinerary_order": 1},
@@ -579,7 +579,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 location_set_members=members,
             )
 
-        self.assertEqual(selected, ["B", "C"])
+        self.assertEqual(selected, ["A", "B"])
 
     def test_assign_labels_prefers_nominatim_as_dual_source_fallback(self) -> None:
         sets = [
