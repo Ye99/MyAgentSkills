@@ -588,23 +588,6 @@ def labels_in_itinerary_order(sets: list[LocationSet]) -> list[str]:
     return [location_set.label for location_set in ordered if location_set.label]
 
 
-def significant_labels_in_itinerary_order(sets: list[LocationSet], max_tags: int) -> list[str]:
-    if max_tags <= 0:
-        return []
-
-    ordered = sorted(sets, key=lambda location_set: min(p.timestamp for p in location_set.points))
-    if len(ordered) <= max_tags:
-        return [location_set.label for location_set in ordered if location_set.label]
-
-    ranked = sorted(
-        ordered,
-        key=lambda location_set: (-len(location_set.points), min(p.timestamp for p in location_set.points)),
-    )
-    picked = ranked[:max_tags]
-    picked_ids = {id(location_set) for location_set in picked}
-    return [location_set.label for location_set in ordered if id(location_set) in picked_ids and location_set.label]
-
-
 def build_target_name(base_name: str, labels: list[str], use_local_agent_compaction: bool = False) -> str:
     deduped = dedupe_labels(labels)
     if not deduped:
@@ -694,7 +677,7 @@ def fetch_nearby_poi(
     api_key: str,
     lat: float,
     lon: float,
-    tag: str,
+    landmark_filter: str,
     radius: int,
     region: str,
     retries: int = 3,
@@ -704,7 +687,7 @@ def fetch_nearby_poi(
     cache_params = {
         "lat": f"{lat:.7f}",
         "lon": f"{lon:.7f}",
-        "tag": tag,
+        "landmark_filter": landmark_filter,
         "radius": int(radius),
         "region": region,
         "format": "json",
@@ -720,7 +703,7 @@ def fetch_nearby_poi(
         "key": api_key,
         "lat": lat,
         "lon": lon,
-        "tag": tag,
+        "tag": landmark_filter,
         "radius": radius,
         "format": "json",
     }
@@ -854,44 +837,91 @@ def _parse_opencode_json(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _extract_candidate_tags(payload: dict[str, Any]) -> list[str]:
-    tags: list[str] = []
-    for key in ["primary_tags", "secondary_tags"]:
+def _extract_string_values(payload: dict[str, Any], keys: list[str]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
         value = payload.get(key)
-        if not isinstance(value, list):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                values.append(stripped)
             continue
-        for entry in value:
-            if isinstance(entry, str) and entry.strip():
-                tags.append(entry.strip())
-    return tags
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, str) and entry.strip():
+                    values.append(entry.strip())
+    return values
 
 
-def select_highlight_labels(
+def _extract_final_landmark_names(payload: dict[str, Any]) -> list[str]:
+    return _extract_string_values(payload, ["final_landmark_names", "final_landmark_name"])
+
+
+def consolidate_itinerary_landmark_names(
     labels: list[str],
-    max_tags: int,
+    max_landmark_names: int,
     opencode_timeout_sec: int,
     opencode_model: str | None,
+    location_set_members: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    if max_tags <= 0:
+    if max_landmark_names <= 0:
         return []
 
     deduped = dedupe_labels(labels)
     if not deduped:
         return []
 
-    fallback = deduped[:max_tags]
+    if location_set_members and len(deduped) > max_landmark_names:
+        stats: dict[str, tuple[int, int]] = {}
+        for entry in location_set_members:
+            raw_name = entry.get("landmark_name")
+            if not isinstance(raw_name, str):
+                continue
+            normalized_name = normalize_label(raw_name)
+            if not normalized_name:
+                continue
+            key = normalized_name.casefold()
+            member_count = int(entry.get("set_member_count") or 0)
+            itinerary_order = int(entry.get("itinerary_order") or 0)
+            previous = stats.get(key)
+            if previous is None:
+                stats[key] = (member_count, itinerary_order)
+            else:
+                stats[key] = (max(previous[0], member_count), min(previous[1], itinerary_order))
+
+        ranked = sorted(
+            deduped,
+            key=lambda label: (
+                -stats.get(label.casefold(), (0, 10**9))[0],
+                stats.get(label.casefold(), (0, 10**9))[1],
+            ),
+        )
+        kept = {name.casefold() for name in ranked[:max_landmark_names]}
+        fallback = [name for name in deduped if name.casefold() in kept][:max_landmark_names]
+    else:
+        fallback = deduped[:max_landmark_names]
+    if len(fallback) <= 1:
+        return fallback
+
     if shutil.which("opencode") is None:
         return fallback
 
     prompt = (
-        "You are selecting folder highlight tags from travel media events. "
+        "You are refining itinerary landmark names visited during a trip. "
+        "Goal: reflect visited places without redundant parent-child landmark names (example: StatueOfLiberty + NewYork -> keep StatueOfLiberty), "
+        "remove redundant parent-city/admin names when a specific POI is present; Choose only from candidates, no invented landmark names. "
+        "Prefer specific names over generic names: 'Statue of Liberty Information Center' is good, plain 'Information Center' is too generic. "
+        "You MAY use tools/web lookup to check place parent-child relationships if uncertain. "
+        "Preserve itinerary order from the original list. "
+        "If two labels are from different countries or distant regions, do not drop one as redundant. "
+        "When location set count is greater than max total landmark names, trim from the smallest location sets first. "
         "Return ONLY JSON with schema "
-        '{"primary_tags":[string],"secondary_tags":[string]}. '
-        "Rules: prefer globally recognizable and high-importance places, "
-        "avoid generic or low-signal places, and do not invent tags not in candidates. "
-        f"Max total tags: {max_tags}. "
-        f"Candidates in itinerary order: {json.dumps(deduped)}"
+        '{"final_landmark_names":[string]}. '
+        f"Max total landmark names: {max_landmark_names}. "
+        f"Candidate landmark names in itinerary order: {json.dumps(deduped)}"
     )
+    if location_set_members:
+        prompt += f" Location set members metadata: {json.dumps(location_set_members, ensure_ascii=True)}"
 
     command = ["opencode"]
     if opencode_model:
@@ -916,21 +946,73 @@ def select_highlight_labels(
     if payload is None:
         return fallback
 
-    requested = dedupe_labels(_extract_candidate_tags(payload))
+    requested = dedupe_labels(_extract_final_landmark_names(payload))
     if not requested:
         return fallback
 
     valid_by_key = {label.casefold(): label for label in deduped}
     selected_keys: set[str] = set()
-    for tag in requested:
-        match = valid_by_key.get(tag.casefold())
+    for landmark_name in requested:
+        match = valid_by_key.get(landmark_name.casefold())
         if match:
             selected_keys.add(match.casefold())
-        if len(selected_keys) >= max_tags:
+        if len(selected_keys) >= max_landmark_names:
             break
 
-    selected = [label for label in deduped if label.casefold() in selected_keys][:max_tags]
-    return selected or fallback
+    selected = [label for label in deduped if label.casefold() in selected_keys][:max_landmark_names]
+    if not selected:
+        return fallback
+
+    minimum_keep = max(2, math.ceil(len(fallback) * 0.5))
+    if len(selected) < minimum_keep:
+        return fallback
+
+    return selected
+
+
+def consolidate_itinerary_labels(
+    labels: list[str],
+    max_landmark_names: int,
+    opencode_timeout_sec: int,
+    opencode_model: str | None,
+    location_set_members: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    # Backward-compatible alias kept for external callers.
+    return consolidate_itinerary_landmark_names(
+        labels=labels,
+        max_landmark_names=max_landmark_names,
+        opencode_timeout_sec=opencode_timeout_sec,
+        opencode_model=opencode_model,
+        location_set_members=location_set_members,
+    )
+
+
+def finalize_landmark_names(
+    sets: list[LocationSet],
+    max_landmark_names: int,
+    opencode_timeout_sec: int,
+    opencode_model: str | None,
+) -> list[str]:
+    ordered = sorted(sets, key=lambda location_set: min(p.timestamp for p in location_set.points))
+    ordered_labels = [location_set.label for location_set in ordered if location_set.label]
+    location_set_members: list[dict[str, Any]] = []
+    for idx, location_set in enumerate(ordered, start=1):
+        if not location_set.label:
+            continue
+        location_set_members.append(
+            {
+                "landmark_name": normalize_label(location_set.label),
+                "set_member_count": len(location_set.points),
+                "itinerary_order": idx,
+            }
+        )
+    return consolidate_itinerary_landmark_names(
+        ordered_labels,
+        max_landmark_names=max_landmark_names,
+        opencode_timeout_sec=opencode_timeout_sec,
+        opencode_model=opencode_model,
+        location_set_members=location_set_members,
+    )
 
 
 def _looks_generic_label(candidate: dict[str, Any]) -> bool:
@@ -950,7 +1032,12 @@ def _looks_generic_label(candidate: dict[str, Any]) -> bool:
 
 
 def _fallback_best_label(normalized_candidates: list[dict[str, Any]]) -> str | None:
-    if not normalized_candidates:
+    viable = [
+        candidate
+        for candidate in normalized_candidates
+        if normalize_label(str(candidate.get("label") or ""))
+    ]
+    if not viable:
         return None
 
     def score(candidate: dict[str, Any]) -> float:
@@ -960,7 +1047,7 @@ def _fallback_best_label(normalized_candidates: list[dict[str, Any]]) -> str | N
         generic_penalty = 0.4 if _looks_generic_label(candidate) else 0.0
         return (0.50 * importance) + (0.30 * place_rank) + (0.20 * proximity) - generic_penalty
 
-    best = max(normalized_candidates, key=score)
+    best = max(viable, key=score)
     label = best.get("label")
     return label if isinstance(label, str) and label.strip() else None
 
@@ -1002,8 +1089,8 @@ def choose_best_label_from_candidates(
         return fallback
 
     prompt = (
-        "Choose exactly one best folder tag candidate for travel highlights. "
-        "Prefer globally recognizable and specific POI/landmark/natural attractions. "
+        "Return exactly one best-matching travel destination name. Give preference to widely recognizable landmarks or natural attractions. "
+        "Prefer specific names over generic names: 'Statue of Liberty Information Center' is good, plain 'Information Center' is too generic. "
         "Avoid generic admin/road/timezone-like names. "
         "Use normalized metrics to compare candidates across sources. "
         "Return ONLY JSON with schema {\"label\": string} and the label MUST be one from the provided candidates. "
@@ -1041,16 +1128,18 @@ def choose_best_label_from_candidates(
     for candidate in normalized_candidates:
         label = candidate.get("label")
         if isinstance(label, str) and label.casefold() == picked_key:
+            if not normalize_label(label):
+                return fallback
             return label
 
     return fallback
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Append itinerary POI labels to a media folder name")
+    parser = argparse.ArgumentParser(description="Append itinerary landmark names to a media folder name")
     parser.add_argument("folder", help="Path to media folder")
     parser.add_argument("--key", default=os.getenv("LOCATIONIQ_API_KEY"), help="LocationIQ API key")
-    parser.add_argument("--ratio", type=float, default=0.6, help="Sampling ratio of GPS-bearing files")
+    parser.add_argument("--ratio", type=float, default=1.0, help="Sampling ratio of GPS-bearing files")
     parser.add_argument(
         "--event-distance-m",
         "--threshold-m",
@@ -1059,15 +1148,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=2000.0,
         help="Distance threshold for location sets in meters",
     )
-    parser.add_argument("--tag", default="all", help="Nearby API tag filter")
+    parser.add_argument("--landmark-filter", default="all", help="Nearby API landmark filter")
     parser.add_argument("--radius", type=int, default=1000, help="Nearby API search radius in meters")
     parser.add_argument("--region", default="us1", choices=["us1", "eu1"], help="LocationIQ region")
     parser.add_argument("--seed", default=None, help="Optional deterministic sampling seed")
     parser.add_argument(
-        "--max-tags",
+        "--max-landmark-names",
+        dest="max_landmark_names",
         type=int,
         default=8,
-        help="Maximum number of highlight tags to keep",
+        help="Maximum number of highlight landmark names to keep",
     )
     parser.add_argument(
         "--opencode-timeout-sec",
@@ -1136,7 +1226,7 @@ def _unique_destination(path: Path) -> Path:
 def _assign_labels(
     sets: list[LocationSet],
     api_key: str,
-    tag: str,
+    landmark_filter: str,
     radius: int,
     region: str,
     use_nominatim_reverse: bool,
@@ -1155,6 +1245,9 @@ def _assign_labels(
     for location_set in sets:
         centroid_lat, centroid_lon = _cluster_centroid(location_set)
         if use_dual_source:
+            # IMPORTANT: grouping integrity is per location set only.
+            # We merge LocationIQ and Nominatim candidates for this centroid,
+            # choose one label, then move to the next set. No cross-set mixing.
             with ThreadPoolExecutor(max_workers=2) as executor:
                 nominatim_future = executor.submit(
                     fetch_nominatim_reverse,
@@ -1171,7 +1264,7 @@ def _assign_labels(
                     api_key,
                     centroid_lat,
                     centroid_lon,
-                    tag,
+                    landmark_filter,
                     radius,
                     region,
                     3,
@@ -1197,8 +1290,7 @@ def _assign_labels(
                 opencode_timeout_sec=opencode_timeout_sec,
                 opencode_model=opencode_model,
             )
-            fallback_label = choose_nominatim_label(reverse_payload) or choose_preferred_label(nearby_results)
-            location_set.label = best_label or fallback_label or "UNKNOWN_LOCATION"
+            location_set.label = best_label or "UNKNOWN_LOCATION"
             continue
 
         if use_nominatim_reverse:
@@ -1220,7 +1312,7 @@ def _assign_labels(
                 api_key=api_key,
                 lat=centroid_lat,
                 lon=centroid_lon,
-                tag=tag,
+                landmark_filter=landmark_filter,
                 radius=radius,
                 region=region,
                 locationiq_rate_limiter=locationiq_rate_limiter,
@@ -1264,7 +1356,7 @@ def main() -> int:
     _assign_labels(
         sets,
         api_key=args.key,
-        tag=args.tag,
+        landmark_filter=args.landmark_filter,
         radius=args.radius,
         region=args.region,
         use_nominatim_reverse=args.use_nominatim_reverse,
@@ -1278,16 +1370,12 @@ def main() -> int:
         api_cache=api_cache,
     )
 
-    ordered_labels = significant_labels_in_itinerary_order(sets, max_tags=args.max_tags)
-    if len(sets) > args.max_tags:
-        selected_labels = ordered_labels
-    else:
-        selected_labels = select_highlight_labels(
-            ordered_labels,
-            max_tags=args.max_tags,
-            opencode_timeout_sec=args.opencode_timeout_sec,
-            opencode_model=args.opencode_model,
-        )
+    selected_labels = finalize_landmark_names(
+        sets,
+        max_landmark_names=args.max_landmark_names,
+        opencode_timeout_sec=args.opencode_timeout_sec,
+        opencode_model=args.opencode_model,
+    )
     base_name = extract_base_date_name(folder.name)
     target_name = build_target_name(
         base_name,
@@ -1298,7 +1386,7 @@ def main() -> int:
     print(f"GPS-bearing files: {len(points)}")
     print(f"Sampled files: {len(sampled)}")
     print(f"Location sets: {len(sets)}")
-    print(f"Ordered labels: {', '.join(dedupe_labels(selected_labels))}")
+    print(f"Ordered landmark names: {', '.join(dedupe_labels(selected_labels))}")
 
     if target_name == folder.name:
         print("No rename needed.")
