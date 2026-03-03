@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from unittest.mock import patch
 import subprocess
+import os
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -62,6 +63,10 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
     def test_dedupe_labels_excludes_unknown_location(self) -> None:
         labels = ["UNKNOWN_LOCATION", "Space Needle", "unknown location", "Seattle"]
         self.assertEqual(mod.dedupe_labels(labels), ["SpaceNeedle", "Seattle"])
+
+    def test_dedupe_labels_preserves_readable_camel_case(self) -> None:
+        labels = ["SummitLakesViewpoint", "KlondikeGoldDredge"]
+        self.assertEqual(mod.dedupe_labels(labels), ["SummitLakesViewpoint", "KlondikeGoldDredge"])
 
     def test_dedupe_labels_excludes_low_signal_labels(self) -> None:
         labels = ["Vancouver", "Monument 5E-92", "Zaozhuang"]
@@ -147,7 +152,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 with patch("rename_folder_with_poi_itinerary.subprocess.run") as run_mock:
                     result = mod.build_target_name("2025_07_02", labels)
         run_mock.assert_not_called()
-        self.assertEqual(result, "2025_07_02_Alaskaairlinescustomerservice,Anchorage,Zaozhuang,Portageglaciercruise")
+        self.assertEqual(result, "2025_07_02_AlaskaAirlinesCustomerService,Anchorage,Zaozhuang,PortageGlacierCruise")
 
     def test_build_target_name_uses_comma_separator(self) -> None:
         result = mod.build_target_name("2025_07_31", ["Nuuk Fitness", "Wall Street"])
@@ -157,6 +162,97 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(mod.extract_base_date_name("2025_08_21_RedmondPool"), "2025_08_21")
         self.assertEqual(mod.extract_base_date_name("2025_08_21"), "2025_08_21")
         self.assertEqual(mod.extract_base_date_name("VacationPhotos"), "VacationPhotos")
+
+    def test_build_parser_defaults_for_max_tags_and_opencode_timeout(self) -> None:
+        parser = mod.build_parser()
+        args = parser.parse_args(["/tmp/2025/2025_07_02"])
+        self.assertEqual(args.max_tags, 8)
+        self.assertEqual(args.opencode_timeout_sec, 60)
+        self.assertEqual(args.event_distance_m, 2000.0)
+        self.assertEqual(args.opencode_model, os.getenv("OPENCODE_MODEL"))
+
+    def test_build_parser_reads_opencode_model_env(self) -> None:
+        with patch.dict("os.environ", {"OPENCODE_MODEL": "openai/gpt-4o-mini"}, clear=False):
+            parser = mod.build_parser()
+            args = parser.parse_args(["/tmp/2025/2025_07_02"])
+        self.assertEqual(args.opencode_model, "openai/gpt-4o-mini")
+
+    def test_significant_labels_pick_top_media_count_then_restore_itinerary_order(self) -> None:
+        sets = [
+            mod.LocationSet(points=[mod.MediaPoint("a1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 9, 0, 0))], label="A"),
+            mod.LocationSet(
+                points=[
+                    mod.MediaPoint("b1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 0, 0)),
+                    mod.MediaPoint("b2.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 1, 0)),
+                    mod.MediaPoint("b3.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 2, 0)),
+                ],
+                label="B",
+            ),
+            mod.LocationSet(
+                points=[
+                    mod.MediaPoint("c1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 11, 0, 0)),
+                    mod.MediaPoint("c2.jpg", 0.0, 0.0, datetime(2025, 7, 4, 11, 1, 0)),
+                ],
+                label="C",
+            ),
+            mod.LocationSet(points=[mod.MediaPoint("d1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 12, 0, 0))], label="D"),
+        ]
+        self.assertEqual(mod.significant_labels_in_itinerary_order(sets, max_tags=2), ["B", "C"])
+
+    def test_select_highlight_labels_uses_opencode_response(self) -> None:
+        labels = ["StatueOfLiberty", "WallStreet", "BatteryPark", "FerryTerminal"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"primary_tags":["StatueOfLiberty","WallStreet"],"secondary_tags":["BatteryPark"]}\n',
+                stderr="",
+            ),
+        ):
+            selected = mod.select_highlight_labels(
+                labels,
+                max_tags=8,
+                opencode_timeout_sec=60,
+                opencode_model=None,
+            )
+        self.assertEqual(selected, ["StatueOfLiberty", "WallStreet", "BatteryPark"])
+
+    def test_select_highlight_labels_passes_model_flag_to_opencode(self) -> None:
+        labels = ["StatueOfLiberty", "WallStreet"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"primary_tags":["StatueOfLiberty","WallStreet"],"secondary_tags":[]}\n',
+                stderr="",
+            ),
+        ) as run_mock:
+            selected = mod.select_highlight_labels(
+                labels,
+                max_tags=8,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+
+        call_args = run_mock.call_args[0][0]
+        self.assertEqual(call_args[:4], ["opencode", "-m", "openai/gpt-4o-mini", "run"])
+        self.assertEqual(selected, ["StatueOfLiberty", "WallStreet"])
+
+    def test_select_highlight_labels_falls_back_when_opencode_fails(self) -> None:
+        labels = ["StatueOfLiberty", "WallStreet", "BatteryPark"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["opencode"], returncode=1, stdout="", stderr="boom"),
+        ):
+            selected = mod.select_highlight_labels(
+                labels,
+                max_tags=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+        self.assertEqual(selected, ["StatueOfLiberty", "WallStreet"])
 
 
 if __name__ == "__main__":
