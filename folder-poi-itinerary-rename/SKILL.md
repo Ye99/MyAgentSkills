@@ -5,11 +5,12 @@ description: Use when renaming day-based media folders using geo-tagged photos/v
 
 # Folder POI Itinerary Rename
 
-Rename folders like `2024_09_18` to `2024_09_18_POI1_POI2_...` using sampled GPS media and Nearby POI resolution.
+Rename day folders like `2024_09_18` to `2024_09_18_POI1_POI2_...` using sampled GPS media and Nearby POI resolution.
+Supports recursive root runs and writes a JSON report for verification.
 
 ## Required Inputs
 
-- A folder path containing photos/videos.
+- An input path (single day folder or a root to scan recursively).
 - LocationIQ API key (environment variable or CLI argument).
 
 ## Required Sub-Skills
@@ -29,25 +30,43 @@ Rename folders like `2024_09_18` to `2024_09_18_POI1_POI2_...` using sampled GPS
 
 ## Usage
 
-Dry-run (default):
+Dry-run (default), single folder:
 
 ```bash
 python3 scripts/rename_folder_with_poi_itinerary.py "/path/to/2024_09_18"
 ```
 
-Apply rename:
+Dry-run (default), recursive root with report:
 
 ```bash
-python3 scripts/rename_folder_with_poi_itinerary.py "/path/to/2024_09_18" --apply
+python3 scripts/rename_folder_with_poi_itinerary.py "/path/to/root" --report-json "folder_poi_itinerary_rename_report.json"
+```
+
+Apply rename, recursive root with report:
+
+```bash
+python3 scripts/rename_folder_with_poi_itinerary.py "/path/to/root" --apply --report-json "folder_poi_itinerary_rename_report.json"
 ```
 
 Optional arguments:
 
 - `--key` (or `LOCATIONIQ_API_KEY`)
+- `--report-json` (default `folder_poi_itinerary_rename_report.json`)
 - `--ratio` (default `1.0`)
 - `--threshold-m` (default `300`)
 - `--radius` (default `1000`)
 - `--region` (`us1` or `eu1`)
+
+## JSON Report
+
+Each run writes a JSON report with summary counts and per-folder statuses. Key verification fields:
+
+- `summary.renamed_count`
+- `summary.already_landmark_named_count`
+- `summary.no_landmark_name_proposed_count`
+- `no_landmark_name_proposed_paths` (list of folders)
+
+Additional troubleshooting fields include candidate/eligible counts, no-GPS count, failure count, and per-folder details.
 
 ## Safety
 
