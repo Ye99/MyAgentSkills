@@ -871,35 +871,7 @@ def consolidate_itinerary_landmark_names(
     if not deduped:
         return []
 
-    if location_set_members and len(deduped) > max_landmark_names:
-        stats: dict[str, tuple[int, int]] = {}
-        for entry in location_set_members:
-            raw_name = entry.get("landmark_name")
-            if not isinstance(raw_name, str):
-                continue
-            normalized_name = normalize_label(raw_name)
-            if not normalized_name:
-                continue
-            key = normalized_name.casefold()
-            member_count = int(entry.get("set_member_count") or 0)
-            itinerary_order = int(entry.get("itinerary_order") or 0)
-            previous = stats.get(key)
-            if previous is None:
-                stats[key] = (member_count, itinerary_order)
-            else:
-                stats[key] = (max(previous[0], member_count), min(previous[1], itinerary_order))
-
-        ranked = sorted(
-            deduped,
-            key=lambda label: (
-                -stats.get(label.casefold(), (0, 10**9))[0],
-                stats.get(label.casefold(), (0, 10**9))[1],
-            ),
-        )
-        kept = {name.casefold() for name in ranked[:max_landmark_names]}
-        fallback = [name for name in deduped if name.casefold() in kept][:max_landmark_names]
-    else:
-        fallback = deduped[:max_landmark_names]
+    fallback = deduped[:max_landmark_names]
     if len(fallback) <= 1:
         return fallback
 
