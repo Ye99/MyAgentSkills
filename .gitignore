@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 .venv-*/
 folder-poi-itinerary-rename/scripts/cache/
+folder_poi_itinerary_rename_state*.json
