@@ -204,10 +204,10 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(mod.extract_base_date_name("2025_08_21"), "2025_08_21")
         self.assertEqual(mod.extract_base_date_name("VacationPhotos"), "VacationPhotos")
 
-    def test_build_parser_defaults_for_max_tags_and_opencode_timeout(self) -> None:
+    def test_build_parser_defaults_for_max_landmark_names_and_opencode_timeout(self) -> None:
         parser = mod.build_parser()
         args = parser.parse_args(["/tmp/2025/2025_07_02"])
-        self.assertEqual(args.max_tags, 8)
+        self.assertEqual(args.max_landmark_names, 8)
         self.assertEqual(args.opencode_timeout_sec, 60)
         self.assertEqual(args.event_distance_m, 2000.0)
         self.assertEqual(args.opencode_model, os.getenv("OPENCODE_MODEL"))
@@ -217,6 +217,11 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(args.nominatim_requests_per_second, 1.0)
         self.assertTrue(args.cache_file.endswith("/folder-poi-itinerary-rename/scripts/cache/geo_api_cache.json"))
         self.assertNotIn("/.cache/", args.cache_file)
+
+    def test_build_parser_rejects_legacy_max_tags_flag(self) -> None:
+        parser = mod.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025/2025_07_02", "--max-tags", "5"])
 
     def test_nominatim_user_agent_name(self) -> None:
         self.assertEqual(mod.APP_USER_AGENT, "Lookup_POI_withlocalcache")
@@ -253,7 +258,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     api_key="k",
                     lat=1.0,
                     lon=2.0,
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     api_cache=cache,
@@ -263,7 +268,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     api_key="k",
                     lat=1.0,
                     lon=2.0,
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     api_cache=cache,
@@ -289,7 +294,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     api_key="k",
                     lat=1.0,
                     lon=2.0,
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                 )
@@ -301,82 +306,274 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
             args = parser.parse_args(["/tmp/2025/2025_07_02"])
         self.assertEqual(args.opencode_model, "openai/gpt-4o-mini")
 
-    def test_significant_labels_pick_top_media_count_then_restore_itinerary_order(self) -> None:
-        sets = [
-            mod.LocationSet(points=[mod.MediaPoint("a1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 9, 0, 0))], label="A"),
-            mod.LocationSet(
-                points=[
-                    mod.MediaPoint("b1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 0, 0)),
-                    mod.MediaPoint("b2.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 1, 0)),
-                    mod.MediaPoint("b3.jpg", 0.0, 0.0, datetime(2025, 7, 4, 10, 2, 0)),
-                ],
-                label="B",
-            ),
-            mod.LocationSet(
-                points=[
-                    mod.MediaPoint("c1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 11, 0, 0)),
-                    mod.MediaPoint("c2.jpg", 0.0, 0.0, datetime(2025, 7, 4, 11, 1, 0)),
-                ],
-                label="C",
-            ),
-            mod.LocationSet(points=[mod.MediaPoint("d1.jpg", 0.0, 0.0, datetime(2025, 7, 4, 12, 0, 0))], label="D"),
-        ]
-        self.assertEqual(mod.significant_labels_in_itinerary_order(sets, max_tags=2), ["B", "C"])
+    def test_build_parser_uses_landmark_filter_argument(self) -> None:
+        parser = mod.build_parser()
+        args = parser.parse_args(["/tmp/2025/2025_07_02", "--landmark-filter", "tourism"])
+        self.assertEqual(args.landmark_filter, "tourism")
 
-    def test_select_highlight_labels_uses_opencode_response(self) -> None:
-        labels = ["StatueOfLiberty", "WallStreet", "BatteryPark", "FerryTerminal"]
+    def test_consolidate_itinerary_labels_uses_opencode_response(self) -> None:
+        labels = ["StatueOfLiberty", "NewYork", "WallStreet"]
         with patch(
             "rename_folder_with_poi_itinerary.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=["opencode"],
                 returncode=0,
-                stdout='{"primary_tags":["StatueOfLiberty","WallStreet"],"secondary_tags":["BatteryPark"]}\n',
+                stdout='{"final_landmark_names":["StatueOfLiberty","WallStreet"]}\n',
                 stderr="",
             ),
         ):
-            selected = mod.select_highlight_labels(
+            selected = mod.consolidate_itinerary_labels(
                 labels,
-                max_tags=8,
-                opencode_timeout_sec=60,
-                opencode_model=None,
-            )
-        self.assertEqual(selected, ["StatueOfLiberty", "WallStreet", "BatteryPark"])
-
-    def test_select_highlight_labels_passes_model_flag_to_opencode(self) -> None:
-        labels = ["StatueOfLiberty", "WallStreet"]
-        with patch(
-            "rename_folder_with_poi_itinerary.subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                args=["opencode"],
-                returncode=0,
-                stdout='{"primary_tags":["StatueOfLiberty","WallStreet"],"secondary_tags":[]}\n',
-                stderr="",
-            ),
-        ) as run_mock:
-            selected = mod.select_highlight_labels(
-                labels,
-                max_tags=8,
+                max_landmark_names=8,
                 opencode_timeout_sec=60,
                 opencode_model="openai/gpt-4o-mini",
             )
-
-        call_args = run_mock.call_args[0][0]
-        self.assertEqual(call_args[:4], ["opencode", "-m", "openai/gpt-4o-mini", "run"])
         self.assertEqual(selected, ["StatueOfLiberty", "WallStreet"])
 
-    def test_select_highlight_labels_falls_back_when_opencode_fails(self) -> None:
-        labels = ["StatueOfLiberty", "WallStreet", "BatteryPark"]
+    def test_consolidate_itinerary_labels_falls_back_when_opencode_fails(self) -> None:
+        labels = ["StatueOfLiberty", "NewYork", "WallStreet"]
         with patch(
             "rename_folder_with_poi_itinerary.subprocess.run",
             return_value=subprocess.CompletedProcess(args=["opencode"], returncode=1, stdout="", stderr="boom"),
         ):
-            selected = mod.select_highlight_labels(
+            selected = mod.consolidate_itinerary_labels(
                 labels,
-                max_tags=2,
+                max_landmark_names=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+        self.assertEqual(selected, ["StatueOfLiberty", "NewYork"])
+
+    def test_consolidate_itinerary_labels_accepts_landmark_name_keys(self) -> None:
+        labels = ["StatueOfLiberty", "NewYork", "WallStreet"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"final_landmark_name":"StatueOfLiberty","final_landmark_names":["WallStreet"]}\n',
+                stderr="",
+            ),
+        ):
+            selected = mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=8,
                 opencode_timeout_sec=60,
                 opencode_model="openai/gpt-4o-mini",
             )
         self.assertEqual(selected, ["StatueOfLiberty", "WallStreet"])
+
+    def test_consolidate_itinerary_labels_prompt_mentions_cross_region_segments(self) -> None:
+        labels = ["Zaozhuang", "McHughCreekDayUseArea", "PortageGlacierCruise"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"final_landmark_names":["Zaozhuang","McHughCreekDayUseArea"]}\n',
+                stderr="",
+            ),
+        ) as run_mock:
+            mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=8,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+
+        prompt = run_mock.call_args[0][0][-1]
+        self.assertIn("different countries or distant regions", prompt)
+        self.assertIn("do not drop one as redundant", prompt)
+        self.assertIn("Statue of Liberty Information Center", prompt)
+        self.assertIn("Information Center", prompt)
+
+    def test_choose_best_label_prompt_handles_specific_vs_generic_information_center(self) -> None:
+        candidates = [
+            {
+                "label": "Statue of Liberty Information Center",
+                "source": "locationiq",
+                "category": "tourism",
+                "type": "information",
+                "importance_raw": None,
+                "place_rank_raw": None,
+                "distance_m": 20.0,
+            },
+            {
+                "label": "Information Center",
+                "source": "locationiq",
+                "category": "tourism",
+                "type": "information",
+                "importance_raw": None,
+                "place_rank_raw": None,
+                "distance_m": 10.0,
+            },
+        ]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"label":"Statue of Liberty Information Center"}\n',
+                stderr="",
+            ),
+        ) as run_mock:
+            mod.choose_best_label_from_candidates(
+                candidates,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+
+        prompt = run_mock.call_args[0][0][-1]
+        self.assertIn("Statue of Liberty Information Center", prompt)
+        self.assertIn("Information Center", prompt)
+
+    def test_consolidate_itinerary_labels_rejects_aggressive_drops(self) -> None:
+        labels = ["StatueOfLiberty", "WallStreet", "BatteryPark", "EllisIsland"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"final_landmark_names":["StatueOfLiberty"]}\n',
+                stderr="",
+            ),
+        ):
+            selected = mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=8,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+        self.assertEqual(selected, labels)
+
+    def test_choose_best_label_from_candidates_avoids_non_ascii_only_pick(self) -> None:
+        candidates = [
+            {
+                "label": "枣庄市立第二医院",
+                "source": "locationiq",
+                "category": "amenity",
+                "type": "hospital",
+                "importance_raw": None,
+                "place_rank_raw": None,
+                "distance_m": 10.0,
+            },
+            {
+                "label": "Zaozhuang",
+                "source": "locationiq",
+                "category": "place",
+                "type": "city",
+                "importance_raw": None,
+                "place_rank_raw": None,
+                "distance_m": 20.0,
+            },
+        ]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"label":"枣庄市立第二医院"}\n',
+                stderr="",
+            ),
+        ):
+            selected = mod.choose_best_label_from_candidates(
+                candidates,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+        self.assertEqual(selected, "Zaozhuang")
+
+    def test_finalize_landmark_names_uses_all_location_sets_before_second_pass(self) -> None:
+        sets = [
+            mod.LocationSet(points=[mod.MediaPoint("a.jpg", 0.0, 0.0, datetime(2025, 7, 1, 9, 0, 0))], label="A"),
+            mod.LocationSet(points=[mod.MediaPoint("b.jpg", 0.0, 0.0, datetime(2025, 7, 1, 10, 0, 0))], label="B"),
+            mod.LocationSet(points=[mod.MediaPoint("c.jpg", 0.0, 0.0, datetime(2025, 7, 1, 11, 0, 0))], label="C"),
+        ]
+        with patch(
+            "rename_folder_with_poi_itinerary.consolidate_itinerary_landmark_names",
+            return_value=["A", "C"],
+        ) as consolidate_mock:
+            selected = mod.finalize_landmark_names(
+                sets,
+                max_landmark_names=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+
+        consolidate_mock.assert_called_once_with(
+            ["A", "B", "C"],
+            max_landmark_names=2,
+            opencode_timeout_sec=60,
+            opencode_model="openai/gpt-4o-mini",
+            location_set_members=[
+                {
+                    "landmark_name": "A",
+                    "set_member_count": 1,
+                    "itinerary_order": 1,
+                },
+                {
+                    "landmark_name": "B",
+                    "set_member_count": 1,
+                    "itinerary_order": 2,
+                },
+                {
+                    "landmark_name": "C",
+                    "set_member_count": 1,
+                    "itinerary_order": 3,
+                },
+            ],
+        )
+        self.assertEqual(selected, ["A", "C"])
+
+    def test_consolidate_itinerary_labels_prompt_includes_member_metadata(self) -> None:
+        labels = ["A", "B", "C"]
+        members = [
+            {"landmark_name": "A", "set_member_count": 20, "itinerary_order": 1},
+            {"landmark_name": "B", "set_member_count": 5, "itinerary_order": 2},
+            {"landmark_name": "C", "set_member_count": 3, "itinerary_order": 3},
+        ]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"final_landmark_names":["A","B"]}\n',
+                stderr="",
+            ),
+        ) as run_mock:
+            mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+                location_set_members=members,
+            )
+
+        prompt = run_mock.call_args[0][0][-1]
+        self.assertIn("Location set members metadata", prompt)
+        self.assertIn("trim from the smallest location sets first", prompt)
+        self.assertIn('"set_member_count": 3', prompt)
+
+    def test_consolidate_itinerary_labels_fallback_trims_smallest_sets_first(self) -> None:
+        labels = ["A", "B", "C"]
+        members = [
+            {"landmark_name": "A", "set_member_count": 1, "itinerary_order": 1},
+            {"landmark_name": "B", "set_member_count": 5, "itinerary_order": 2},
+            {"landmark_name": "C", "set_member_count": 3, "itinerary_order": 3},
+        ]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["opencode"], returncode=1, stdout="", stderr="boom"),
+        ):
+            selected = mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+                location_set_members=members,
+            )
+
+        self.assertEqual(selected, ["B", "C"])
 
     def test_assign_labels_prefers_nominatim_when_enabled(self) -> None:
         sets = [
@@ -390,7 +587,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 mod._assign_labels(
                     sets,
                     api_key="fake",
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     use_nominatim_reverse=True,
@@ -503,7 +700,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     mod._assign_labels(
                         sets,
                         api_key="fake",
-                        tag="all",
+                        landmark_filter="all",
                         radius=1000,
                         region="us1",
                         use_nominatim_reverse=True,
@@ -520,6 +717,52 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         passed_candidates = pick_mock.call_args.args[0]
         self.assertEqual(len(passed_candidates), 3)
         self.assertEqual(sets[0].label, "Svartifoss")
+
+    def test_assign_labels_dual_source_does_not_mix_candidates_across_location_sets(self) -> None:
+        sets = [
+            mod.LocationSet(
+                points=[mod.MediaPoint("x1.jpg", 64.0, -17.0, datetime(2025, 7, 10, 10, 0, 0))],
+                label=None,
+            ),
+            mod.LocationSet(
+                points=[mod.MediaPoint("x2.jpg", 65.0, -18.0, datetime(2025, 7, 10, 11, 0, 0))],
+                label=None,
+            ),
+        ]
+
+        with patch(
+            "rename_folder_with_poi_itinerary.fetch_nominatim_reverse",
+            side_effect=[{"name": "NomA"}, {"name": "NomB"}],
+        ):
+            with patch(
+                "rename_folder_with_poi_itinerary.fetch_nearby_poi",
+                side_effect=[[{"name": "LocA"}], [{"name": "LocB"}]],
+            ):
+                with patch(
+                    "rename_folder_with_poi_itinerary.choose_best_label_from_candidates",
+                    side_effect=["ChosenA", "ChosenB"],
+                ) as pick_mock:
+                    mod._assign_labels(
+                        sets,
+                        api_key="fake",
+                        landmark_filter="all",
+                        radius=1000,
+                        region="us1",
+                        use_nominatim_reverse=False,
+                        use_dual_source=True,
+                        opencode_timeout_sec=60,
+                        opencode_model="openai/gpt-4o-mini",
+                        locationiq_requests_per_second=1.0,
+                        nominatim_zoom=18,
+                        nominatim_layer="poi,natural,manmade",
+                    )
+
+        first_candidates = {entry["label"] for entry in pick_mock.call_args_list[0].args[0]}
+        second_candidates = {entry["label"] for entry in pick_mock.call_args_list[1].args[0]}
+        self.assertEqual(first_candidates, {"LocA", "NomA"})
+        self.assertEqual(second_candidates, {"LocB", "NomB"})
+        self.assertEqual(sets[0].label, "ChosenA")
+        self.assertEqual(sets[1].label, "ChosenB")
 
     def test_assign_labels_dual_source_uses_two_service_tasks(self) -> None:
         sets = [
@@ -542,7 +785,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 mod._assign_labels(
                     sets,
                     api_key="fake",
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     use_nominatim_reverse=False,
@@ -578,7 +821,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 mod._assign_labels(
                     sets,
                     api_key="fake",
-                    tag="all",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     use_nominatim_reverse=False,
@@ -609,7 +852,35 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                 mod._assign_labels(
                     sets,
                     api_key="fake",
-                    tag="all",
+                    landmark_filter="all",
+                    radius=1000,
+                    region="us1",
+                    use_nominatim_reverse=False,
+                    use_dual_source=True,
+                    opencode_timeout_sec=60,
+                    opencode_model="openai/gpt-4o-mini",
+                    locationiq_requests_per_second=1.0,
+                    nominatim_zoom=18,
+                    nominatim_layer="poi,natural,manmade",
+                )
+        self.assertEqual(sets[0].label, "UNKNOWN_LOCATION")
+
+    def test_assign_labels_dual_source_does_not_use_unfiltered_raw_fallback(self) -> None:
+        sets = [
+            mod.LocationSet(
+                points=[mod.MediaPoint("x.jpg", 59.0, -140.0, datetime(2025, 7, 10, 10, 0, 0))],
+                label=None,
+            )
+        ]
+        with patch("rename_folder_with_poi_itinerary.fetch_nominatim_reverse", return_value={}):
+            with patch(
+                "rename_folder_with_poi_itinerary.fetch_nearby_poi",
+                return_value=[{"name": "Seward Highway", "class": "highway", "type": "primary"}],
+            ):
+                mod._assign_labels(
+                    sets,
+                    api_key="fake",
+                    landmark_filter="all",
                     radius=1000,
                     region="us1",
                     use_nominatim_reverse=False,
