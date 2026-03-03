@@ -53,6 +53,12 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
             ],
             started_at=datetime(2026, 3, 3, 12, 0, 0),
             finished_at=datetime(2026, 3, 3, 12, 0, 5),
+            run_stats={
+                "processed_this_run_count": 2,
+                "skipped_frozen_applied_count": 1,
+                "retried_error_count": 1,
+                "retried_no_landmark_count": 1,
+            },
         )
 
         self.assertEqual(report["summary"]["renamed_count"], 1)
@@ -61,10 +67,141 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(report["summary"]["planned_rename_count"], 1)
         self.assertEqual(report["summary"]["rename_failed_count"], 1)
         self.assertEqual(report["summary"]["no_gps_media_count"], 1)
+        self.assertEqual(report["summary"]["processed_this_run_count"], 2)
+        self.assertEqual(report["summary"]["skipped_frozen_applied_count"], 1)
+        self.assertEqual(report["summary"]["retried_error_count"], 1)
+        self.assertEqual(report["summary"]["retried_no_landmark_count"], 1)
         self.assertEqual(
             report["no_landmark_name_proposed_paths"],
             ["/tmp/root/2025_07_04"],
         )
+
+    def test_resume_state_round_trip(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = {
+                "version": 1,
+                "folders": {
+                    "/tmp/root/2025_07_02": {
+                        "latest_status": "renamed",
+                        "attempt_count": 1,
+                    }
+                },
+            }
+            mod.save_resume_state(state_path, state)
+            loaded = mod.load_resume_state(state_path)
+
+        self.assertEqual(loaded, state)
+
+    def test_should_process_folder_honors_freeze_and_retry_caps(self) -> None:
+        retry_cfg = {"error_retry_max": 2, "no_landmark_retry_max": 1}
+        self.assertFalse(
+            mod.should_process_folder(
+                {
+                    "latest_status": "renamed",
+                    "error_attempt_count": 0,
+                    "no_landmark_attempt_count": 0,
+                },
+                retry_cfg,
+            )
+        )
+        self.assertTrue(
+            mod.should_process_folder(
+                {
+                    "latest_status": "error",
+                    "error_attempt_count": 2,
+                    "no_landmark_attempt_count": 0,
+                },
+                retry_cfg,
+            )
+        )
+        self.assertFalse(
+            mod.should_process_folder(
+                {
+                    "latest_status": "error",
+                    "error_attempt_count": 3,
+                    "no_landmark_attempt_count": 0,
+                },
+                retry_cfg,
+            )
+        )
+        self.assertTrue(
+            mod.should_process_folder(
+                {
+                    "latest_status": "skipped-no-landmark-name-proposed",
+                    "error_attempt_count": 0,
+                    "no_landmark_attempt_count": 1,
+                },
+                retry_cfg,
+            )
+        )
+        self.assertFalse(
+            mod.should_process_folder(
+                {
+                    "latest_status": "skipped-no-landmark-name-proposed",
+                    "error_attempt_count": 0,
+                    "no_landmark_attempt_count": 2,
+                },
+                retry_cfg,
+            )
+        )
+
+    def test_shutdown_controller_first_and_second_signal(self) -> None:
+        controller = mod.ShutdownController()
+        self.assertFalse(controller.request_shutdown("signal"))
+        self.assertTrue(controller.shutdown_requested)
+        self.assertFalse(controller.force_exit)
+        self.assertTrue(controller.request_shutdown("signal"))
+        self.assertTrue(controller.force_exit)
+
+    def test_coverage_invariant_detects_missed_folder(self) -> None:
+        discovered_ids = {"/tmp/root/2025_07_20", "/tmp/root/2025_07_21"}
+        folder_results = [{"folder_id": "/tmp/root/2025_07_20", "status": "renamed"}]
+        check = mod.compute_coverage_check(discovered_ids, folder_results, pending_folder_ids=[])
+        self.assertTrue(check["coverage_check_failed"])
+        self.assertEqual(check["missing_folder_ids"], ["/tmp/root/2025_07_21"])
+
+    def test_main_graceful_interrupt_stops_before_next_folder(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "2025_07_02").mkdir()
+            (root / "2025_07_03").mkdir()
+            state_path = root / "state.json"
+            report_path = root / "report.json"
+
+            call_count = {"n": 0}
+
+            def fake_process(folder: Path, args, api_cache):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    assert mod._ACTIVE_SHUTDOWN_CONTROLLER is not None
+                    mod._ACTIVE_SHUTDOWN_CONTROLLER.request_shutdown("signal")
+                return {
+                    "folder_path": str(folder),
+                    "status": "planned-rename",
+                    "target_name": folder.name + "_X",
+                }
+
+            argv = [
+                "rename_folder_with_poi_itinerary.py",
+                str(root),
+                "--key",
+                "k",
+                "--state-json",
+                str(state_path),
+                "--report-json",
+                str(report_path),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch("rename_folder_with_poi_itinerary.process_single_folder", side_effect=fake_process):
+                    exit_code = mod.main()
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 130)
+            self.assertEqual(call_count["n"], 1)
+            self.assertTrue(payload["interrupted"])
+            self.assertEqual(payload["interrupt_source"], "signal")
+            self.assertEqual(payload["pending_folder_ids"], [str(root / "2025_07_03")])
 
     def test_process_single_folder_marks_no_landmark_when_target_unchanged(self) -> None:
         folder = Path("/tmp/2025_07_04")
@@ -300,6 +437,9 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(args.nominatim_layer, "poi,natural,manmade")
         self.assertEqual(args.nominatim_requests_per_second, 1.0)
         self.assertEqual(args.report_json, "folder_poi_itinerary_rename_report.json")
+        self.assertEqual(args.state_json, "folder_poi_itinerary_rename_state.json")
+        self.assertEqual(args.error_retry_max, 2)
+        self.assertEqual(args.no_landmark_retry_max, 1)
         self.assertTrue(args.cache_file.endswith("/folder-poi-itinerary-rename/scripts/cache/geo_api_cache.json"))
         self.assertNotIn("/.cache/", args.cache_file)
 

@@ -11,6 +11,7 @@ import math
 import os
 import random
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,50 @@ MAX_FOLDER_NAME_LEN = 120
 DATE_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}(?:_|$)")
 DATE_NAME_RE = re.compile(r"^(\d{4})_(\d{2})_(\d{2})$")
 APP_USER_AGENT = "Lookup_POI_withlocalcache"
+
+
+_ACTIVE_SHUTDOWN_CONTROLLER: "ShutdownController | None" = None
+
+
+class ShutdownController:
+    def __init__(self) -> None:
+        self.interrupt_count = 0
+        self.shutdown_requested = False
+        self.force_exit = False
+        self.interrupt_source: str | None = None
+
+    def request_shutdown(self, source: str) -> bool:
+        self.interrupt_count += 1
+        if self.interrupt_count == 1:
+            self.shutdown_requested = True
+            if self.interrupt_source is None:
+                self.interrupt_source = source
+            return False
+
+        self.force_exit = True
+        if self.interrupt_source is None:
+            self.interrupt_source = source
+        return True
+
+
+def install_signal_handlers(controller: ShutdownController) -> tuple[Any, Any]:
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _handler(_signum: int, _frame: Any) -> None:
+        if controller.request_shutdown("signal"):
+            raise KeyboardInterrupt
+        print("Interrupt received. Graceful stop requested; finishing current folder.", file=sys.stderr)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+    return previous_sigint, previous_sigterm
+
+
+def restore_signal_handlers(previous_handlers: tuple[Any, Any]) -> None:
+    previous_sigint, previous_sigterm = previous_handlers
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def default_cache_path() -> Path:
@@ -639,6 +684,81 @@ def discover_day_folders(root_path: Path) -> list[dict[str, str]]:
     return discovered
 
 
+def canonical_folder_id(folder_path: Path) -> str:
+    base_name = extract_base_date_name(folder_path.name)
+    return str(folder_path.with_name(base_name))
+
+
+def _default_resume_state() -> dict[str, Any]:
+    return {"version": 1, "folders": {}}
+
+
+def load_resume_state(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        return _default_resume_state()
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to parse state file {state_path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid state file {state_path}: expected JSON object")
+    folders = payload.get("folders")
+    if not isinstance(folders, dict):
+        raise RuntimeError(f"Invalid state file {state_path}: missing 'folders' object")
+    if "version" not in payload:
+        payload["version"] = 1
+    return payload
+
+
+def save_resume_state(state_path: Path, state: dict[str, Any]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
+    tmp_path.write_text(json.dumps(state, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(state_path)
+
+
+def should_process_folder(state_entry: dict[str, Any] | None, retry_cfg: dict[str, int]) -> bool:
+    if not state_entry:
+        return True
+
+    latest_status = str(state_entry.get("latest_status") or "")
+    if latest_status in {"renamed", "error-retry-exhausted", "no-landmark-retry-exhausted"}:
+        return False
+
+    if latest_status == "error":
+        error_attempt_count = int(state_entry.get("error_attempt_count") or 0)
+        return error_attempt_count < retry_cfg["error_retry_max"] + 1
+
+    if latest_status == "skipped-no-landmark-name-proposed":
+        no_landmark_attempt_count = int(state_entry.get("no_landmark_attempt_count") or 0)
+        return no_landmark_attempt_count < retry_cfg["no_landmark_retry_max"] + 1
+
+    return True
+
+
+def compute_coverage_check(
+    discovered_ids: set[str],
+    folder_results: list[dict[str, Any]],
+    pending_folder_ids: list[str],
+) -> dict[str, Any]:
+    terminal_ids = {
+        str(entry.get("folder_id"))
+        for entry in folder_results
+        if isinstance(entry.get("folder_id"), str)
+    }
+    pending_ids = {str(folder_id) for folder_id in pending_folder_ids}
+    accounted_ids = terminal_ids | pending_ids
+
+    missing_folder_ids = sorted(discovered_ids - accounted_ids)
+    unexpected_folder_ids = sorted(accounted_ids - discovered_ids)
+    return {
+        "coverage_check_failed": bool(missing_folder_ids or unexpected_folder_ids),
+        "missing_folder_ids": missing_folder_ids,
+        "unexpected_folder_ids": unexpected_folder_ids,
+    }
+
+
 def find_available_local_agent() -> str | None:
     for name in ["opencode", "claude", "codex"]:
         if shutil.which(name):
@@ -1224,6 +1344,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="folder_poi_itinerary_rename_report.json",
         help="JSON report output path",
     )
+    parser.add_argument(
+        "--state-json",
+        default="folder_poi_itinerary_rename_state.json",
+        help="State ledger path used for resumable multi-day runs",
+    )
+    parser.add_argument(
+        "--error-retry-max",
+        type=int,
+        default=2,
+        help="Maximum retries for folders ending in error (excludes first attempt)",
+    )
+    parser.add_argument(
+        "--no-landmark-retry-max",
+        type=int,
+        default=1,
+        help="Maximum retries for folders ending in no-landmark-proposed (excludes first attempt)",
+    )
     parser.add_argument("--apply", action="store_true", help="Apply folder rename")
     return parser
 
@@ -1383,6 +1520,8 @@ def build_rename_report(
     discovered_folders: list[dict[str, str]],
     started_at: datetime,
     finished_at: datetime,
+    run_stats: dict[str, int] | None = None,
+    run_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     def _iso_utc(value: datetime) -> str:
         utc_value = value.astimezone(timezone.utc).replace(microsecond=0)
@@ -1390,6 +1529,12 @@ def build_rename_report(
 
     def _count(entries: list[dict[str, Any]], status: str) -> int:
         return sum(1 for entry in entries if entry.get("status") == status)
+
+    def _count_many(entries: list[dict[str, Any]], statuses: set[str]) -> int:
+        return sum(1 for entry in entries if entry.get("status") in statuses)
+
+    stats = run_stats or {}
+    meta = run_meta or {}
 
     no_landmark_paths = sorted(
         str(entry["folder_path"])
@@ -1406,6 +1551,16 @@ def build_rename_report(
         for entry in folder_results
         if entry.get("status") == "error"
     )
+    error_retry_exhausted_paths = sorted(
+        str(entry["folder_path"])
+        for entry in folder_results
+        if entry.get("status") == "error-retry-exhausted"
+    )
+    no_landmark_retry_exhausted_paths = sorted(
+        str(entry["folder_path"])
+        for entry in folder_results
+        if entry.get("status") == "no-landmark-retry-exhausted"
+    )
 
     summary = {
         "candidate_folder_count": len(discovered_folders),
@@ -1416,7 +1571,12 @@ def build_rename_report(
         "already_landmark_named_count": _count(folder_results, "skipped-already-landmark-named"),
         "no_landmark_name_proposed_count": _count(folder_results, "skipped-no-landmark-name-proposed"),
         "no_gps_media_count": _count(folder_results, "skipped-no-gps-media"),
-        "rename_failed_count": _count(folder_results, "error"),
+        "rename_failed_count": _count_many(folder_results, {"error", "error-retry-exhausted"}),
+        "processed_this_run_count": int(stats.get("processed_this_run_count", 0)),
+        "skipped_frozen_applied_count": int(stats.get("skipped_frozen_applied_count", 0)),
+        "retried_error_count": int(stats.get("retried_error_count", 0)),
+        "retried_no_landmark_count": int(stats.get("retried_no_landmark_count", 0)),
+        "pending_folder_count": len(meta.get("pending_folder_ids") or []),
     }
 
     report = {
@@ -1425,10 +1585,19 @@ def build_rename_report(
         "started_at": _iso_utc(started_at),
         "finished_at": _iso_utc(finished_at),
         "duration_seconds": round(max(0.0, (finished_at - started_at).total_seconds()), 3),
+        "interrupted": bool(meta.get("interrupted", False)),
+        "interrupt_source": meta.get("interrupt_source"),
+        "last_completed_folder_id": meta.get("last_completed_folder_id"),
+        "pending_folder_ids": sorted(str(folder_id) for folder_id in (meta.get("pending_folder_ids") or [])),
+        "coverage_check_failed": bool(meta.get("coverage_check_failed", False)),
+        "missing_folder_ids": sorted(str(folder_id) for folder_id in (meta.get("missing_folder_ids") or [])),
+        "unexpected_folder_ids": sorted(str(folder_id) for folder_id in (meta.get("unexpected_folder_ids") or [])),
         "summary": summary,
         "no_landmark_name_proposed_paths": no_landmark_paths,
         "already_landmark_named_paths": already_named_paths,
         "error_paths": error_paths,
+        "error_retry_exhausted_paths": error_retry_exhausted_paths,
+        "no_landmark_retry_exhausted_paths": no_landmark_retry_exhausted_paths,
         "folders": sorted(folder_results, key=lambda entry: str(entry.get("folder_path") or "")),
     }
     return report
@@ -1445,53 +1614,220 @@ def main() -> int:
 
     input_path = Path(args.folder).expanduser().resolve()
     report_path = Path(args.report_json).expanduser().resolve()
+    state_path = Path(args.state_json).expanduser().resolve()
     started_at = datetime.now(timezone.utc)
+    shutdown_controller = ShutdownController()
+    previous_handlers = install_signal_handlers(shutdown_controller)
+    global _ACTIVE_SHUTDOWN_CONTROLLER
+    _ACTIVE_SHUTDOWN_CONTROLLER = shutdown_controller
 
-    if not input_path.exists() or not input_path.is_dir():
-        print(f"Folder not found: {input_path}", file=sys.stderr)
-        return 2
+    retry_cfg = {
+        "error_retry_max": max(int(args.error_retry_max), 0),
+        "no_landmark_retry_max": max(int(args.no_landmark_retry_max), 0),
+    }
+    run_stats = {
+        "processed_this_run_count": 0,
+        "skipped_frozen_applied_count": 0,
+        "retried_error_count": 0,
+        "retried_no_landmark_count": 0,
+    }
+    run_meta: dict[str, Any] = {
+        "interrupted": False,
+        "interrupt_source": None,
+        "last_completed_folder_id": None,
+        "pending_folder_ids": [],
+        "coverage_check_failed": False,
+        "missing_folder_ids": [],
+        "unexpected_folder_ids": [],
+    }
 
-    if args.nominatim_requests_per_second > 1.0:
-        print("Nominatim policy requires <= 1 request per second.", file=sys.stderr)
-        return 2
+    try:
+        if not input_path.exists() or not input_path.is_dir():
+            print(f"Folder not found: {input_path}", file=sys.stderr)
+            return 2
 
-    single_folder_input = is_supported_date_folder_path(input_path)
-    if single_folder_input:
-        discovered_folders = [{"folder_path": str(input_path), "status": "eligible-date-folder"}]
-    elif _is_already_landmark_named_folder_name(input_path.name):
-        discovered_folders = [{"folder_path": str(input_path), "status": "already-landmark-named"}]
-    else:
-        discovered_folders = discover_day_folders(input_path)
+        if args.nominatim_requests_per_second > 1.0:
+            print("Nominatim policy requires <= 1 request per second.", file=sys.stderr)
+            return 2
 
-    folder_results: list[dict[str, Any]] = []
-    eligible_folders: list[Path] = []
+        try:
+            resume_state = load_resume_state(state_path)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
-    for entry in discovered_folders:
-        folder_path = Path(entry["folder_path"])
-        status = entry["status"]
-        if status == "already-landmark-named":
-            folder_results.append(
-                {
-                    "folder_path": str(folder_path),
-                    "status": "skipped-already-landmark-named",
-                    "base_name": extract_base_date_name(folder_path.name),
-                    "target_name": folder_path.name,
-                }
+        folders_state = resume_state.setdefault("folders", {})
+
+        def _entry(folder_id: str) -> dict[str, Any]:
+            existing = folders_state.get(folder_id)
+            if isinstance(existing, dict):
+                return existing
+            created: dict[str, Any] = {"first_seen_at": started_at.isoformat().replace("+00:00", "Z")}
+            folders_state[folder_id] = created
+            return created
+
+        def _persist_state() -> None:
+            save_resume_state(state_path, resume_state)
+
+        single_folder_input = is_supported_date_folder_path(input_path)
+        if single_folder_input:
+            discovered_folders = [{"folder_path": str(input_path), "status": "eligible-date-folder"}]
+        elif _is_already_landmark_named_folder_name(input_path.name):
+            discovered_folders = [{"folder_path": str(input_path), "status": "already-landmark-named"}]
+        else:
+            discovered_folders = discover_day_folders(input_path)
+
+        discovered_ids = {canonical_folder_id(Path(entry["folder_path"])) for entry in discovered_folders}
+
+        folder_results: list[dict[str, Any]] = []
+        eligible_folders: list[tuple[Path, str]] = []
+
+        for entry in discovered_folders:
+            folder_path = Path(entry["folder_path"])
+            folder_id = canonical_folder_id(folder_path)
+            state_entry = _entry(folder_id)
+            status = entry["status"]
+            if status == "already-landmark-named":
+                result_status = "skipped-already-landmark-named"
+                if state_entry.get("latest_status") == "renamed":
+                    result_status = "skipped-frozen-applied"
+                    run_stats["skipped_frozen_applied_count"] += 1
+                folder_results.append(
+                    {
+                        "folder_path": str(folder_path),
+                        "folder_id": folder_id,
+                        "status": result_status,
+                        "base_name": extract_base_date_name(folder_path.name),
+                        "target_name": folder_path.name,
+                        "processed_this_run": False,
+                    }
+                )
+                if result_status == "skipped-already-landmark-named":
+                    state_entry["latest_status"] = "skipped-already-landmark-named"
+                state_entry["last_seen_path"] = str(folder_path)
+                state_entry["last_attempt_at"] = started_at.isoformat().replace("+00:00", "Z")
+                _persist_state()
+                continue
+
+            if status == "eligible-date-folder":
+                if should_process_folder(state_entry, retry_cfg):
+                    eligible_folders.append((folder_path, folder_id))
+                    continue
+
+                latest_status = str(state_entry.get("latest_status") or "")
+                skipped_status = "skipped-frozen-applied"
+                if latest_status in {"error", "error-retry-exhausted"}:
+                    skipped_status = "error-retry-exhausted"
+                    state_entry["latest_status"] = "error-retry-exhausted"
+                elif latest_status in {"skipped-no-landmark-name-proposed", "no-landmark-retry-exhausted"}:
+                    skipped_status = "no-landmark-retry-exhausted"
+                    state_entry["latest_status"] = "no-landmark-retry-exhausted"
+
+                if skipped_status == "skipped-frozen-applied":
+                    run_stats["skipped_frozen_applied_count"] += 1
+
+                folder_results.append(
+                    {
+                        "folder_path": str(folder_path),
+                        "folder_id": folder_id,
+                        "status": skipped_status,
+                        "base_name": extract_base_date_name(folder_path.name),
+                        "target_name": folder_path.name,
+                        "processed_this_run": False,
+                    }
+                )
+                state_entry["last_seen_path"] = str(folder_path)
+                state_entry["last_attempt_at"] = started_at.isoformat().replace("+00:00", "Z")
+                _persist_state()
+
+        if eligible_folders and not args.key:
+            for folder, folder_id in eligible_folders:
+                folder_results.append(
+                    {
+                        "folder_path": str(folder),
+                        "folder_id": folder_id,
+                        "status": "error",
+                        "error": "Missing API key. Use --key or LOCATIONIQ_API_KEY.",
+                        "processed_this_run": False,
+                    }
+                )
+
+            finished_at = datetime.now(timezone.utc)
+            coverage_check = compute_coverage_check(discovered_ids, folder_results, pending_folder_ids=[])
+            run_meta.update(coverage_check)
+            report = build_rename_report(
+                root_path=input_path,
+                apply_mode=args.apply,
+                folder_results=folder_results,
+                discovered_folders=discovered_folders,
+                started_at=started_at,
+                finished_at=finished_at,
+                run_stats=run_stats,
+                run_meta=run_meta,
             )
-            continue
+            _write_report(report_path, report)
+            print(f"Wrote report: {report_path}")
+            print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
+            return 2
 
-        if status == "eligible-date-folder":
-            eligible_folders.append(folder_path)
+        api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve()) if eligible_folders else None
+        pending_folder_ids: list[str] = []
 
-    if eligible_folders and not args.key:
-        for folder in eligible_folders:
-            folder_results.append(
-                {
-                    "folder_path": str(folder),
-                    "status": "error",
-                    "error": "Missing API key. Use --key or LOCATIONIQ_API_KEY.",
-                }
-            )
+        for index, (folder, folder_id) in enumerate(eligible_folders):
+            if shutdown_controller.shutdown_requested:
+                pending_folder_ids.extend(remaining_folder_id for _, remaining_folder_id in eligible_folders[index:])
+                break
+
+            result = process_single_folder(folder, args, api_cache)
+            result["folder_id"] = folder_id
+            result["processed_this_run"] = True
+            run_stats["processed_this_run_count"] += 1
+
+            state_entry = _entry(folder_id)
+            state_entry["attempt_count"] = int(state_entry.get("attempt_count") or 0) + 1
+            state_entry["last_seen_path"] = str(folder)
+            state_entry["last_attempt_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            outcome_status = str(result.get("status") or "")
+            if outcome_status == "renamed":
+                state_entry["latest_status"] = "renamed"
+                state_entry["applied_destination"] = str(result.get("applied_destination") or "")
+                state_entry["last_success_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            elif outcome_status == "error":
+                error_attempt_count = int(state_entry.get("error_attempt_count") or 0) + 1
+                state_entry["error_attempt_count"] = error_attempt_count
+                state_entry["last_error"] = str(result.get("error") or "")
+                if error_attempt_count > 1:
+                    run_stats["retried_error_count"] += 1
+                if error_attempt_count >= retry_cfg["error_retry_max"] + 1:
+                    result["status"] = "error-retry-exhausted"
+                    state_entry["latest_status"] = "error-retry-exhausted"
+                else:
+                    state_entry["latest_status"] = "error"
+            elif outcome_status == "skipped-no-landmark-name-proposed":
+                no_landmark_attempt_count = int(state_entry.get("no_landmark_attempt_count") or 0) + 1
+                state_entry["no_landmark_attempt_count"] = no_landmark_attempt_count
+                if no_landmark_attempt_count > 1:
+                    run_stats["retried_no_landmark_count"] += 1
+                if no_landmark_attempt_count >= retry_cfg["no_landmark_retry_max"] + 1:
+                    result["status"] = "no-landmark-retry-exhausted"
+                    state_entry["latest_status"] = "no-landmark-retry-exhausted"
+                else:
+                    state_entry["latest_status"] = "skipped-no-landmark-name-proposed"
+            else:
+                state_entry["latest_status"] = outcome_status
+
+            state_entry["base_name"] = extract_base_date_name(folder.name)
+            state_entry["last_target_name"] = str(result.get("target_name") or "")
+            _persist_state()
+            folder_results.append(result)
+            run_meta["last_completed_folder_id"] = folder_id
+
+        run_meta["interrupted"] = shutdown_controller.shutdown_requested
+        run_meta["interrupt_source"] = shutdown_controller.interrupt_source
+        run_meta["pending_folder_ids"] = sorted(pending_folder_ids)
+        coverage_check = compute_coverage_check(discovered_ids, folder_results, pending_folder_ids=pending_folder_ids)
+        run_meta.update(coverage_check)
 
         finished_at = datetime.now(timezone.utc)
         report = build_rename_report(
@@ -1501,43 +1837,41 @@ def main() -> int:
             discovered_folders=discovered_folders,
             started_at=started_at,
             finished_at=finished_at,
+            run_stats=run_stats,
+            run_meta=run_meta,
         )
         _write_report(report_path, report)
+
+        summary = report["summary"]
         print(f"Wrote report: {report_path}")
-        print("Missing API key. Use --key or LOCATIONIQ_API_KEY.", file=sys.stderr)
-        return 2
+        print(f"Candidate folders: {summary['candidate_folder_count']}")
+        print(f"Planned renames: {summary['planned_rename_count']}")
+        print(f"Renamed folders: {summary['renamed_count']}")
+        print(f"Already landmark named: {summary['already_landmark_named_count']}")
+        print(f"No landmark proposed: {summary['no_landmark_name_proposed_count']}")
+        print(f"Folders with no GPS media: {summary['no_gps_media_count']}")
+        print(f"Rename failures: {summary['rename_failed_count']}")
+        print(f"Processed this run: {summary['processed_this_run_count']}")
+        print(f"Skipped frozen applied: {summary['skipped_frozen_applied_count']}")
+        print(f"Retried errors: {summary['retried_error_count']}")
+        print(f"Retried no-landmark: {summary['retried_no_landmark_count']}")
 
-    api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve()) if eligible_folders else None
-
-    for folder in eligible_folders:
-        folder_results.append(process_single_folder(folder, args, api_cache))
-
-    finished_at = datetime.now(timezone.utc)
-    report = build_rename_report(
-        root_path=input_path,
-        apply_mode=args.apply,
-        folder_results=folder_results,
-        discovered_folders=discovered_folders,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-    _write_report(report_path, report)
-
-    summary = report["summary"]
-    print(f"Wrote report: {report_path}")
-    print(f"Candidate folders: {summary['candidate_folder_count']}")
-    print(f"Planned renames: {summary['planned_rename_count']}")
-    print(f"Renamed folders: {summary['renamed_count']}")
-    print(f"Already landmark named: {summary['already_landmark_named_count']}")
-    print(f"No landmark proposed: {summary['no_landmark_name_proposed_count']}")
-    print(f"Folders with no GPS media: {summary['no_gps_media_count']}")
-    print(f"Rename failures: {summary['rename_failed_count']}")
-
-    if single_folder_input and len(folder_results) == 1 and folder_results[0].get("status") == "skipped-no-gps-media":
-        return 1
-    if summary["rename_failed_count"] > 0:
-        return 1
-    return 0
+        if report.get("coverage_check_failed"):
+            print("Coverage check failed: discovered folders did not reconcile with outcomes.", file=sys.stderr)
+            return 1
+        if report.get("interrupted"):
+            return 130
+        if single_folder_input and len(folder_results) == 1 and folder_results[0].get("status") == "skipped-no-gps-media":
+            return 1
+        if summary["rename_failed_count"] > 0:
+            return 1
+        return 0
+    except KeyboardInterrupt:
+        print("Forced interruption received; exiting immediately.", file=sys.stderr)
+        return 130
+    finally:
+        restore_signal_handlers(previous_handlers)
+        _ACTIVE_SHUTDOWN_CONTROLLER = None
 
 
 if __name__ == "__main__":
