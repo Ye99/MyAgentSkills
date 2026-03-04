@@ -406,6 +406,27 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
                     result = mod.build_target_name("2025_07_02", labels, use_local_agent_compaction=True)
         self.assertEqual(result, "2025_07_02_AlaskaAirlines,Anchorage")
 
+    def test_compact_folder_name_opencode_uses_variant_medium(self) -> None:
+        with patch("rename_folder_with_poi_itinerary.find_available_local_agent", return_value="opencode"):
+            with patch(
+                "rename_folder_with_poi_itinerary.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["opencode"],
+                    returncode=0,
+                    stdout="2025_07_02_AlaskaAirlines,Anchorage\n",
+                    stderr="",
+                ),
+            ) as run_mock:
+                compacted = mod.compact_folder_name_with_local_agent(
+                    "2025_07_02",
+                    ["AlaskaAirlinesCustomerService", "Anchorage"],
+                    max_len=40,
+                )
+
+        self.assertEqual(compacted, "2025_07_02_AlaskaAirlines,Anchorage")
+        command = run_mock.call_args[0][0]
+        self.assertEqual(command[0:4], ["opencode", "--variant", "medium", "--prompt"])
+
     def test_build_target_name_does_not_use_local_agent_by_default(self) -> None:
         labels = [
             "AlaskaAirlinesCustomerService",
@@ -621,6 +642,27 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertIn("do not drop one as redundant", prompt)
         self.assertIn("Statue of Liberty Information Center", prompt)
         self.assertIn("Information Center", prompt)
+
+    def test_consolidate_itinerary_labels_opencode_uses_variant_medium(self) -> None:
+        labels = ["A", "B", "C"]
+        with patch(
+            "rename_folder_with_poi_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"],
+                returncode=0,
+                stdout='{"final_landmark_names":["A","B"]}\n',
+                stderr="",
+            ),
+        ) as run_mock:
+            mod.consolidate_itinerary_labels(
+                labels,
+                max_landmark_names=2,
+                opencode_timeout_sec=60,
+                opencode_model="openai/gpt-4o-mini",
+            )
+
+        command = run_mock.call_args[0][0]
+        self.assertEqual(command[:6], ["opencode", "-m", "openai/gpt-4o-mini", "--variant", "medium", "run"])
 
     def test_select_top_candidates_returns_both_specific_and_generic(self) -> None:
         candidates = [

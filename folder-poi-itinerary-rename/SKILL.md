@@ -28,6 +28,7 @@ Supports resumable multi-day runs with a persistent state ledger.
 5. Order landmark names by set start time (itinerary order).
 6. Deduplicate repeated landmark names globally while preserving first occurrence.
 7. Do not enforce a hard limit on unique landmark names.
+8. When invoking `opencode` in this workflow, pass `--variant medium`.
 
 ## Usage
 
