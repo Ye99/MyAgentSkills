@@ -297,6 +297,27 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         }
         self.assertEqual(mod.choose_nominatim_label(payload), "Skeidararsandur")
 
+    def test_choose_nominatim_label_prefers_city_over_numeric_street_display_name(self) -> None:
+        payload = {
+            "display_name": "123 Example Avenue, SampleCity, ExampleState, ExampleCountry",
+            "address": {"city": "SampleCity"},
+        }
+        self.assertEqual(mod.choose_nominatim_label(payload), "SampleCity")
+
+    def test_build_locationiq_candidates_prefers_city_over_numeric_street_name(self) -> None:
+        poi = {
+            "name": "123 Example Avenue",
+            "address": {"city": "SampleCity"},
+            "class": "amenity",
+            "type": "parking",
+            "lat": "47.6205",
+            "lon": "-122.3493",
+        }
+        candidates = mod.build_locationiq_candidates([poi], 47.6205, -122.3493)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["label"], "SampleCity")
+        self.assertEqual(candidates[0]["label_origin"], "city")
+
     def test_choose_nominatim_label_rejects_timezone_boundary(self) -> None:
         payload = {
             "name": "Alaska - Timezone America/Yakutat",
@@ -446,7 +467,7 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         self.assertEqual(result, "2025_07_31_NuukFitness,WallStreet")
 
     def test_extract_base_date_name_from_already_renamed_folder(self) -> None:
-        self.assertEqual(mod.extract_base_date_name("2025_08_21_RedmondPool"), "2025_08_21")
+        self.assertEqual(mod.extract_base_date_name("2025_08_21_SampleCityPool"), "2025_08_21")
         self.assertEqual(mod.extract_base_date_name("2025_08_21"), "2025_08_21")
         self.assertEqual(mod.extract_base_date_name("VacationPhotos"), "VacationPhotos")
 
@@ -947,6 +968,32 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         ]
         label = mod.choose_best_label_from_candidates(candidates)
         self.assertEqual(label, "Svartifoss")
+
+    def test_choose_best_label_from_candidates_prefers_city_over_numeric_street(self) -> None:
+        candidates = [
+            {
+                "label": "123 Example Avenue",
+                "source": "nominatim",
+                "category": "amenity",
+                "type": "letter_box",
+                "importance_raw": 0.9,
+                "place_rank_raw": 30.0,
+                "distance_m": 5.0,
+            },
+            {
+                "label": "SampleCity",
+                "source": "locationiq",
+                "category": "leisure",
+                "type": "picnic_table",
+                "label_origin": "city",
+                "importance_raw": 0.1,
+                "place_rank_raw": 5.0,
+                "distance_m": 500.0,
+            },
+        ]
+
+        label = mod.choose_best_label_from_candidates(candidates)
+        self.assertEqual(label, "SampleCity")
 
     def test_choose_best_label_from_candidates_single_generic_returns_none(self) -> None:
         candidates = [

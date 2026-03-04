@@ -407,6 +407,29 @@ def _is_rejected_label(label: str, category: str | None = None, candidate_type: 
     return False
 
 
+def _looks_numeric_street_label(label: str) -> bool:
+    lower_label = label.strip().lower()
+    if not re.search(r"\d", lower_label):
+        return False
+    street_tokens = [
+        "street",
+        "st",
+        "avenue",
+        "ave",
+        "road",
+        "rd",
+        "boulevard",
+        "blvd",
+        "lane",
+        "ln",
+        "drive",
+        "dr",
+        "highway",
+        "hwy",
+    ]
+    return any(re.search(rf"\b{re.escape(token)}\b", lower_label) for token in street_tokens)
+
+
 def choose_nominatim_label(payload: dict[str, Any]) -> str | None:
     category = str(payload.get("category") or payload.get("class") or "")
     candidate_type = str(payload.get("type") or "")
@@ -414,6 +437,12 @@ def choose_nominatim_label(payload: dict[str, Any]) -> str | None:
     name = payload.get("name")
     if isinstance(name, str) and name.strip():
         picked = name.strip()
+        if _looks_numeric_street_label(picked):
+            address = payload.get("address")
+            if isinstance(address, dict):
+                city = _city_from_address(address)
+                if city:
+                    return city
         if not _is_rejected_label(picked, category=category, candidate_type=candidate_type):
             return picked
 
@@ -430,6 +459,12 @@ def choose_nominatim_label(payload: dict[str, Any]) -> str | None:
     if isinstance(display_name, str) and display_name.strip():
         first_segment = display_name.split(",", 1)[0].strip()
         if first_segment:
+            if _looks_numeric_street_label(first_segment):
+                address = payload.get("address")
+                if isinstance(address, dict):
+                    city = _city_from_address(address)
+                    if city:
+                        return city
             if not _is_rejected_label(first_segment, category=category, candidate_type=candidate_type):
                 return first_segment
 
@@ -505,13 +540,24 @@ def build_locationiq_candidates(
         address_raw = poi.get("address")
         address: dict[str, Any] = address_raw if isinstance(address_raw, dict) else {}
 
+        label_origin = ""
         label = name.strip() if isinstance(name, str) and name.strip() else None
+        if label is not None:
+            label_origin = "name"
+            if _looks_numeric_street_label(label):
+                city = _city_from_address(address)
+                if city:
+                    label = city
+                    label_origin = "city"
         if label is None:
             label = _city_from_address(address)
+            if label is not None:
+                label_origin = "city"
         if label is None:
             road = address.get("road")
             if isinstance(road, str) and road.strip():
                 label = road.strip()
+                label_origin = "road"
         if label is None:
             continue
 
@@ -526,6 +572,7 @@ def build_locationiq_candidates(
                 "source": "locationiq",
                 "category": str(poi.get("class") or poi.get("category") or ""),
                 "type": str(poi.get("type") or poi.get("tag_type") or ""),
+                "label_origin": label_origin,
                 "importance_raw": _as_float(poi.get("importance")),
                 "place_rank_raw": _as_float(poi.get("place_rank")),
                 "distance_m": _candidate_distance_m(poi.get("lat"), poi.get("lon"), centroid_lat, centroid_lon),
@@ -1348,7 +1395,23 @@ def choose_best_label_from_candidates(
         return only
 
     normalized_candidates = normalize_candidate_metrics(cleaned)
-    return _fallback_best_label(normalized_candidates)
+    best_label = _fallback_best_label(normalized_candidates)
+    if not isinstance(best_label, str):
+        return None
+    if not re.search(r"\d", best_label):
+        return best_label
+
+    city_like_types = {"city", "town", "village", "municipality"}
+    city_candidates = [
+        candidate
+        for candidate in normalized_candidates
+        if str(candidate.get("label_origin") or "").casefold() == "city"
+        or str(candidate.get("type") or "").casefold() in city_like_types
+    ]
+    city_label = _fallback_best_label(city_candidates)
+    if isinstance(city_label, str) and city_label.strip():
+        return city_label
+    return best_label
 
 
 def select_top_candidates(
