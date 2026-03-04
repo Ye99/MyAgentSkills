@@ -1,5 +1,7 @@
 import unittest
 import json
+import io
+from email.message import Message
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -7,6 +9,7 @@ from unittest.mock import patch, MagicMock
 import subprocess
 import os
 from tempfile import TemporaryDirectory
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -1267,6 +1270,239 @@ class RenameFolderWithPoiItineraryTests(unittest.TestCase):
         prompt = run_mock.call_args[0][0][-1]
         self.assertIn("runner_up_candidates", prompt)
         self.assertIn("substitute one of its runner-ups", prompt)
+
+    def test_fetch_nearby_poi_raises_stop_on_rate_limited_day(self) -> None:
+        error = HTTPError(
+            url="https://us1.locationiq.com/v1/nearby",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=Message(),
+            fp=io.BytesIO(b'{"error":"Rate Limited Day"}'),
+        )
+
+        with patch("rename_folder_with_poi_itinerary.urlopen", side_effect=error):
+            with self.assertRaises(mod.LocationIQGracefulStop) as ctx:
+                mod.fetch_nearby_poi(
+                    api_key="k",
+                    lat=1.0,
+                    lon=2.0,
+                    landmark_filter="all",
+                    radius=1000,
+                    region="us1",
+                )
+
+        self.assertEqual(ctx.exception.reason, "locationiq-rate-limited-day")
+
+    def test_fetch_nearby_poi_unknown_429_stops_when_balance_low(self) -> None:
+        class FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return self._body.encode("utf-8")
+
+        def fake_urlopen(req, timeout=30):  # noqa: ANN001
+            request_url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "balance" in request_url:
+                return FakeResponse('{"balance":{"day":99,"bonus":0}}')
+            raise HTTPError(
+                url=request_url,
+                code=429,
+                msg="Too Many Requests",
+                hdrs=Message(),
+                fp=io.BytesIO(b'{"error":"Too Many Requests"}'),
+            )
+
+        with patch("rename_folder_with_poi_itinerary.urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(mod.LocationIQGracefulStop) as ctx:
+                mod.fetch_nearby_poi(
+                    api_key="k",
+                    lat=1.0,
+                    lon=2.0,
+                    landmark_filter="all",
+                    radius=1000,
+                    region="us1",
+                )
+
+        self.assertEqual(ctx.exception.reason, "locationiq-balance-low-threshold")
+
+    def test_fetch_nearby_poi_unknown_429_with_balance_100_does_not_auto_stop_low_balance(self) -> None:
+        class FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return self._body.encode("utf-8")
+
+        def fake_urlopen(req, timeout=30):  # noqa: ANN001
+            request_url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "balance" in request_url:
+                return FakeResponse('{"balance":{"day":100,"bonus":0}}')
+            raise HTTPError(
+                url=request_url,
+                code=429,
+                msg="Too Many Requests",
+                hdrs=Message(),
+                fp=io.BytesIO(b'{"error":"Too Many Requests"}'),
+            )
+
+        with patch("rename_folder_with_poi_itinerary.urlopen", side_effect=fake_urlopen):
+            with patch("rename_folder_with_poi_itinerary.time.sleep"):
+                with self.assertRaises(mod.LocationIQGracefulStop) as ctx:
+                    mod.fetch_nearby_poi(
+                        api_key="k",
+                        lat=1.0,
+                        lon=2.0,
+                        landmark_filter="all",
+                        radius=1000,
+                        region="us1",
+                        retries=1,
+                    )
+
+        self.assertEqual(ctx.exception.reason, "locationiq-rate-limit-unknown")
+
+    def test_fetch_nearby_poi_rate_limited_minute_retries_then_stops(self) -> None:
+        error = HTTPError(
+            url="https://us1.locationiq.com/v1/nearby",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=Message(),
+            fp=io.BytesIO(b'{"error":"Rate Limited Minute"}'),
+        )
+
+        with patch("rename_folder_with_poi_itinerary.urlopen", side_effect=error):
+            with patch("rename_folder_with_poi_itinerary.time.sleep"):
+                with self.assertRaises(mod.LocationIQGracefulStop) as ctx:
+                    mod.fetch_nearby_poi(
+                        api_key="k",
+                        lat=1.0,
+                        lon=2.0,
+                        landmark_filter="all",
+                        radius=1000,
+                        region="us1",
+                        retries=1,
+                    )
+
+        self.assertEqual(ctx.exception.reason, "locationiq-rate-limit-retry-exhausted")
+
+    def test_fetch_nearby_poi_rate_limited_minute_retries_then_succeeds(self) -> None:
+        class FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return self._body.encode("utf-8")
+
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=30):  # noqa: ANN001
+            calls["n"] += 1
+            request_url = req.full_url if hasattr(req, "full_url") else str(req)
+            if calls["n"] == 1:
+                raise HTTPError(
+                    url=request_url,
+                    code=429,
+                    msg="Too Many Requests",
+                    hdrs=Message(),
+                    fp=io.BytesIO(b'{"error":"Rate Limited Minute"}'),
+                )
+            return FakeResponse('[{"name":"A"}]')
+
+        with patch("rename_folder_with_poi_itinerary.urlopen", side_effect=fake_urlopen):
+            with patch("rename_folder_with_poi_itinerary.time.sleep"):
+                result = mod.fetch_nearby_poi(
+                    api_key="k",
+                    lat=1.0,
+                    lon=2.0,
+                    landmark_filter="all",
+                    radius=1000,
+                    region="us1",
+                    retries=2,
+                )
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(result, [{"name": "A"}])
+
+    def test_assign_labels_propagates_locationiq_graceful_stop(self) -> None:
+        sets = [
+            mod.LocationSet(
+                points=[mod.MediaPoint("x.jpg", 64.027411, -16.975069, datetime(2025, 7, 10, 10, 0, 0))],
+                label=None,
+            )
+        ]
+
+        with patch("rename_folder_with_poi_itinerary.fetch_nominatim_reverse", return_value={"name": "Svartifoss"}):
+            with patch(
+                "rename_folder_with_poi_itinerary.fetch_nearby_poi",
+                side_effect=mod.LocationIQGracefulStop("locationiq-rate-limited-day", "Rate Limited Day"),
+            ):
+                with self.assertRaises(mod.LocationIQGracefulStop):
+                    mod._assign_labels(
+                        sets,
+                        api_key="fake",
+                        landmark_filter="all",
+                        radius=1000,
+                        region="us1",
+                        locationiq_requests_per_second=1.0,
+                        nominatim_zoom=18,
+                        nominatim_layer="poi,natural,manmade",
+                    )
+
+    def test_main_graceful_stop_for_locationiq_rate_limit_keeps_pending(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "2025_07_02").mkdir()
+            (root / "2025_07_03").mkdir()
+            state_path = root / "state.json"
+            report_path = root / "report.json"
+
+            call_count = {"n": 0}
+
+            def fake_process(folder: Path, args, api_cache):
+                call_count["n"] += 1
+                raise mod.LocationIQGracefulStop("locationiq-rate-limited-day", "Rate Limited Day")
+
+            argv = [
+                "rename_folder_with_poi_itinerary.py",
+                str(root),
+                "--key",
+                "k",
+                "--state-json",
+                str(state_path),
+                "--report-json",
+                str(report_path),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch("rename_folder_with_poi_itinerary.process_single_folder", side_effect=fake_process):
+                    exit_code = mod.main()
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(call_count["n"], 1)
+            self.assertTrue(payload["interrupted"])
+            self.assertEqual(payload["interrupt_source"], "locationiq-rate-limited-day")
+            self.assertEqual(
+                payload["pending_folder_ids"],
+                [str(root / "2025_07_02"), str(root / "2025_07_03")],
+            )
 
 
 if __name__ == "__main__":
