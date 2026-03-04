@@ -29,6 +29,20 @@ curl "https://us1.locationiq.com/v1/nearby?key=${LOCATIONIQ_API_KEY}&lat=40.6891
 - Required params: `key`, `lat`, `lon`
 - Common params: `tag` (default `all`), `radius` (1..30000), `format=json`
 
+## us1 vs eu1 Semantics
+
+- In LocationIQ docs, `us1`/`eu1` are presented as region endpoints chosen mainly for lower latency (closer to users), not as documented separate coverage datasets.
+- Nearby POI docs list both endpoints but do not explicitly promise identical output across regions.
+- Nearby POI is explicitly marked Public Beta; response behavior may change.
+- Practical guidance: for reproducible pipelines, pick one region per dataset/batch and keep it fixed for reruns.
+
+Source references:
+- Search docs (endpoint selection for speed): `https://docs.locationiq.com/docs/search-forward-geocoding`
+- Reverse docs (endpoint selection for speed): `https://docs.locationiq.com/docs/reverse-geocoding`
+- Timezone docs (choose endpoint closer to users): `https://docs.locationiq.com/docs/timezone`
+- Nearby docs (public beta + dual endpoints): `https://docs.locationiq.com/docs/nearby-poi`
+- Nearby API ref: `https://docs.locationiq.com/reference/nearby-poi-api`
+
 ## Rate Limits (Service/Plan)
 
 Nearby POI uses your account plan limits (not a separate public Nearby-only quota in docs).
