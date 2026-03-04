@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -46,6 +47,27 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         self.assertFalse(is_media)
         self.assertEqual(reason, "cache:non_media")
         self.assertFalse(needs_lookup)
+
+    def test_auto_triage_unknown_signature_marks_media_on_video_stream(self) -> None:
+        ffprobe_payload = '{"streams":[{"codec_type":"video"}]}'
+        completed = mock.Mock(returncode=0, stdout=ffprobe_payload, stderr="")
+
+        with mock.patch.object(mod.shutil, "which", return_value="/usr/bin/ffprobe"):
+            with mock.patch.object(mod.subprocess, "run", return_value=completed):
+                classification, reason = mod.auto_triage_unknown_signature(Path("/tmp/example.bin"))
+
+        self.assertEqual(classification, "media")
+        self.assertEqual(reason, "ffprobe:auto-media")
+
+    def test_auto_triage_unknown_signature_marks_non_media_on_invalid_data(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="", stderr="Invalid data found when processing input")
+
+        with mock.patch.object(mod.shutil, "which", return_value="/usr/bin/ffprobe"):
+            with mock.patch.object(mod.subprocess, "run", return_value=completed):
+                classification, reason = mod.auto_triage_unknown_signature(Path("/tmp/example.bin"))
+
+        self.assertEqual(classification, "non_media")
+        self.assertEqual(reason, "ffprobe:invalid-data-non-media")
 
     def test_resolve_capture_datetime_uses_gps_utc_conversion(self) -> None:
         record = {

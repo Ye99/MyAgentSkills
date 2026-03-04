@@ -79,6 +79,54 @@ def classify_media_signature(
     return False, "mime-non-media", False
 
 
+def auto_triage_unknown_signature(source_path: Path, timeout_sec: int = 10) -> tuple[str | None, str]:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None, "ffprobe:unavailable"
+
+    cmd = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=format_name:stream=codec_type,codec_name",
+        "-of",
+        "json",
+        str(source_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        return None, "ffprobe:timeout"
+    except Exception:
+        return None, "ffprobe:error"
+
+    stderr_lower = result.stderr.lower()
+    if result.returncode != 0:
+        if "invalid data found when processing input" in stderr_lower:
+            return "non_media", "ffprobe:invalid-data-non-media"
+        return None, "ffprobe:nonzero"
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None, "ffprobe:bad-json"
+
+    streams = payload.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return "non_media", "ffprobe:no-streams-non-media"
+
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = str(stream.get("codec_type") or "").strip().lower()
+        if codec_type in {"video", "audio"}:
+            return "media", "ffprobe:auto-media"
+
+    return "non_media", "ffprobe:non-media-streams"
+
+
 def is_system_metadata_path(path: Path) -> bool:
     parts = path.parts
     if any(part in MAC_METADATA_DIRS for part in parts):
@@ -568,13 +616,21 @@ def main() -> int:
         )
 
         key = signature_key(mime_type, file_type, extension)
+        if needs_lookup:
+            triaged, triage_reason = auto_triage_unknown_signature(source_path)
+            if triaged in {"media", "non_media"}:
+                signature_cache[key] = triaged
+                is_media = triaged == "media"
+                reason = triage_reason
+                needs_lookup = False
+
         if needs_lookup and key not in unknown_signatures:
             unknown_signatures[key] = {
                 "signature_key": key,
                 "mime_type": str(mime_type or ""),
                 "file_type": str(file_type or ""),
                 "example_source_path": str(source_path),
-                "note": "Lookup once via AI/web and cache decision as media/non_media.",
+                "note": "ffprobe auto-triage was unavailable/inconclusive; lookup once via AI/web and cache decision as media/non_media.",
             }
 
         if not is_media:
@@ -695,7 +751,7 @@ def main() -> int:
     print(f"Media copy failed: {len(failed)}")
     print(f"Missed media: {len(missed_media)}")
     print(f"Non-media not copied: {len(non_media_not_copied)}")
-    print(f"Unknown signatures needing AI lookup: {len(unknown_signatures)}")
+    print(f"Unknown signatures still needing AI lookup: {len(unknown_signatures)}")
 
     if args.apply and missed_media:
         print("Verification failed: missed media detected. See report for details.", file=sys.stderr)

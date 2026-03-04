@@ -68,10 +68,17 @@ Optional:
 - `--workers <n>`
 - `--verbose`
 
-## Unknown Signature Workflow (AI + Cache)
+## Unknown Signature Workflow (Auto + AI Fallback)
 
-1. Run dry-run and inspect `unknown_signatures_needing_ai_lookup` in report.
-2. For each unique signature, try `ffprobe` first on the example file path:
+The organizer now auto-triages unknown signatures with `ffprobe` during the run and writes decisions into `--signature-cache`:
+
+- if `ffprobe` shows any `video` or `audio` stream, classify as `media`
+- if `ffprobe` shows no streams, invalid data, or only non-media stream types, classify as `non_media`
+
+Only unresolved cases are emitted in `unknown_signatures_needing_ai_lookup`.
+
+1. Run dry-run/apply and inspect `unknown_signatures_needing_ai_lookup` in report.
+2. For any remaining unresolved signature, try `ffprobe` manually on the example file path:
 
 ```bash
 ffprobe -v error -show_entries format=format_name:stream=codec_type,codec_name -of json "/path/to/example"
