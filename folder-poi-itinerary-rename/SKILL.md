@@ -77,6 +77,9 @@ Optional arguments:
 - Folders with `error` are retried up to `--error-retry-max` times.
 - Folders with `skipped-no-landmark-name-proposed` are retried up to `--no-landmark-retry-max` times.
 - After retry cap is reached, folder status becomes retry-exhausted and is skipped in later runs.
+- If LocationIQ returns `429` with `Rate Limited Day`, stop the run gracefully and persist pending folders for resume.
+- If LocationIQ returns `429` with `Rate Limited Second`/`Rate Limited Minute`, retry with bounded backoff; if retries are exhausted, stop gracefully (do not continue with partial single-service data).
+- If LocationIQ returns unknown/ambiguous `429`, use Balance API as a secondary signal and treat `balance.day < 100` as exhausted; stop gracefully. Balance values can lag under continuous API traffic.
 - Press `Ctrl+C` once for graceful stop: current folder finishes, state/report flush, and remaining folders resume next run.
 - Press `Ctrl+C` twice for immediate abort.
 

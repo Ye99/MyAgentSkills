@@ -60,8 +60,16 @@ Source references:
 
 - Prefer server-side calls for private workloads.
 - For browser/mobile tokens, use referrer/IP restrictions where supported and rotate tokens.
-- On HTTP `429`, apply exponential backoff with jitter.
+- On HTTP `429`, inspect the error message and branch:
+  - `Rate Limited Second` / `Rate Limited Minute`: retry with bounded exponential backoff + jitter.
+  - `Rate Limited Day`: non-retryable for the current run; stop gracefully and resume after quota reset.
+  - Unknown/ambiguous `429`: optionally use Balance API as a secondary signal, but treat balance as potentially lagging under continuous calls.
+- For conservative batch safety on unknown `429`, treat `balance.day < 100` as exhausted and stop gracefully.
 - Log request IDs and status codes, not full secrets.
+
+Balance API references:
+- Guide: `https://docs.locationiq.com/docs/balance-api`
+- API ref: `https://docs.locationiq.com/reference/balance-api-ref`
 
 ## Secret and PII Safety Checklist
 

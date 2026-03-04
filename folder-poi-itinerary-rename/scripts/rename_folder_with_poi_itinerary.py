@@ -31,9 +31,17 @@ MAX_FOLDER_NAME_LEN = 120
 DATE_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}(?:_|$)")
 DATE_NAME_RE = re.compile(r"^(\d{4})_(\d{2})_(\d{2})$")
 APP_USER_AGENT = "Lookup_POI_withlocalcache"
+LOW_BALANCE_THRESHOLD = 100
+UNKNOWN_429_BALANCE_RECHECK_SEC = 2.0
 
 
 _ACTIVE_SHUTDOWN_CONTROLLER: "ShutdownController | None" = None
+
+
+class LocationIQGracefulStop(RuntimeError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ShutdownController:
@@ -812,6 +820,69 @@ def sanitize_compacted_name(name: str, base_name: str) -> str:
     return cleaned
 
 
+def classify_locationiq_429_bucket(payload_text: str) -> str:
+    lowered = payload_text.lower()
+    if "rate limited day" in lowered:
+        return "day"
+    if "rate limited minute" in lowered:
+        return "minute"
+    if "rate limited second" in lowered:
+        return "second"
+    return "unknown"
+
+
+def parse_locationiq_balance_day(payload: Any) -> int | None:
+    if isinstance(payload, dict):
+        nested = payload.get("balance")
+        day_value: Any = None
+        if isinstance(nested, dict):
+            day_value = nested.get("day")
+        if day_value is not None:
+            try:
+                return int(day_value)
+            except (TypeError, ValueError):
+                return None
+
+        day_value = payload.get("day")
+        if day_value is not None:
+            try:
+                return int(day_value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_locationiq_balance_day(api_key: str, region: str = "us1") -> int | None:
+    params = {"key": api_key, "format": "json"}
+    endpoint = f"https://{region}.locationiq.com/v1/balance?{urlencode(params)}"
+    try:
+        with urlopen(endpoint, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    return parse_locationiq_balance_day(payload)
+
+
+def evaluate_unknown_429_balance_stop(api_key: str, region: str) -> tuple[str | None, str | None]:
+    first_balance = fetch_locationiq_balance_day(api_key, region=region)
+    if first_balance is not None and first_balance < LOW_BALANCE_THRESHOLD:
+        return (
+            "locationiq-balance-low-threshold",
+            f"LocationIQ balance.day {first_balance} is below threshold {LOW_BALANCE_THRESHOLD}.",
+        )
+
+    if first_balance is not None:
+        time.sleep(UNKNOWN_429_BALANCE_RECHECK_SEC)
+        second_balance = fetch_locationiq_balance_day(api_key, region=region)
+        if second_balance is not None and second_balance < LOW_BALANCE_THRESHOLD:
+            return (
+                "locationiq-balance-low-threshold-confirmed",
+                f"LocationIQ balance.day {second_balance} is below threshold {LOW_BALANCE_THRESHOLD} on recheck.",
+            )
+
+    return None, None
+
+
 def fetch_nearby_poi(
     api_key: str,
     lat: float,
@@ -871,13 +942,43 @@ def fetch_nearby_poi(
             if api_cache is not None:
                 api_cache.set("locationiq-nearby", cache_params, error_payload)
 
-            if exc.code == 429 and attempt < retries:
-                retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                retry_after_sec = float(retry_after) if retry_after and retry_after.isdigit() else 0.0
-                jitter = random.uniform(0.05, 0.25)
-                time.sleep(max(retry_after_sec, 0.5 * (2 ** (attempt - 1)) + jitter))
-                continue
-            if exc.code in {404, 429}:
+            if exc.code == 429:
+                bucket = classify_locationiq_429_bucket(body)
+                if bucket == "day":
+                    raise LocationIQGracefulStop(
+                        "locationiq-rate-limited-day",
+                        "LocationIQ returned HTTP 429 Rate Limited Day.",
+                    ) from exc
+
+                if bucket == "unknown" and attempt == 1:
+                    stop_reason, stop_message = evaluate_unknown_429_balance_stop(api_key, region=region)
+                    if stop_reason and stop_message:
+                        raise LocationIQGracefulStop(stop_reason, stop_message) from exc
+
+                if attempt < retries:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    retry_after_sec = 0.0
+                    if retry_after:
+                        try:
+                            retry_after_sec = float(retry_after)
+                        except ValueError:
+                            retry_after_sec = 0.0
+                    jitter = random.uniform(0.05, 0.25)
+                    time.sleep(max(retry_after_sec, 0.5 * (2 ** (attempt - 1)) + jitter))
+                    continue
+
+                if bucket in {"second", "minute"}:
+                    raise LocationIQGracefulStop(
+                        "locationiq-rate-limit-retry-exhausted",
+                        f"LocationIQ HTTP 429 Rate Limited {bucket.title()} retries exhausted.",
+                    ) from exc
+
+                raise LocationIQGracefulStop(
+                    "locationiq-rate-limit-unknown",
+                    "LocationIQ HTTP 429 with unknown rate-limit scope; retries exhausted.",
+                ) from exc
+
+            if exc.code == 404:
                 return []
             raise RuntimeError(f"LocationIQ HTTP {exc.code}: {body}") from exc
         except URLError as exc:
@@ -1418,11 +1519,15 @@ def _assign_labels(
             )
             try:
                 reverse_payload = nominatim_future.result()
+            except LocationIQGracefulStop:
+                raise
             except RuntimeError:
                 reverse_payload = {}
 
             try:
                 nearby_results = nearby_future.result()
+            except LocationIQGracefulStop:
+                raise
             except RuntimeError:
                 nearby_results = []
 
@@ -1508,6 +1613,8 @@ def process_single_folder(
         result["applied_destination"] = str(destination)
         return result
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, LocationIQGracefulStop):
+            raise
         result["status"] = "error"
         result["error"] = str(exc)
         return result
@@ -1773,12 +1880,20 @@ def main() -> int:
         api_cache = LocalApiCache(Path(args.cache_file).expanduser().resolve()) if eligible_folders else None
         pending_folder_ids: list[str] = []
 
+        quota_stop_reason: str | None = None
+
         for index, (folder, folder_id) in enumerate(eligible_folders):
             if shutdown_controller.shutdown_requested:
                 pending_folder_ids.extend(remaining_folder_id for _, remaining_folder_id in eligible_folders[index:])
                 break
 
-            result = process_single_folder(folder, args, api_cache)
+            try:
+                result = process_single_folder(folder, args, api_cache)
+            except LocationIQGracefulStop as exc:
+                quota_stop_reason = exc.reason
+                pending_folder_ids.extend(remaining_folder_id for _, remaining_folder_id in eligible_folders[index:])
+                break
+
             result["folder_id"] = folder_id
             result["processed_this_run"] = True
             run_stats["processed_this_run_count"] += 1
@@ -1823,8 +1938,8 @@ def main() -> int:
             folder_results.append(result)
             run_meta["last_completed_folder_id"] = folder_id
 
-        run_meta["interrupted"] = shutdown_controller.shutdown_requested
-        run_meta["interrupt_source"] = shutdown_controller.interrupt_source
+        run_meta["interrupted"] = shutdown_controller.shutdown_requested or quota_stop_reason is not None
+        run_meta["interrupt_source"] = quota_stop_reason or shutdown_controller.interrupt_source
         run_meta["pending_folder_ids"] = sorted(pending_folder_ids)
         coverage_check = compute_coverage_check(discovered_ids, folder_results, pending_folder_ids=pending_folder_ids)
         run_meta.update(coverage_check)
@@ -1856,10 +1971,16 @@ def main() -> int:
         print(f"Retried errors: {summary['retried_error_count']}")
         print(f"Retried no-landmark: {summary['retried_no_landmark_count']}")
 
+        if quota_stop_reason:
+            print(f"Graceful stop: {quota_stop_reason}", file=sys.stderr)
+
         if report.get("coverage_check_failed"):
             print("Coverage check failed: discovered folders did not reconcile with outcomes.", file=sys.stderr)
             return 1
         if report.get("interrupted"):
+            interrupt_source = str(report.get("interrupt_source") or "")
+            if interrupt_source.startswith("locationiq-"):
+                return 1
             return 130
         if single_folder_input and len(folder_results) == 1 and folder_results[0].get("status") == "skipped-no-gps-media":
             return 1
