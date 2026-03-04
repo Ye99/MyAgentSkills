@@ -790,7 +790,10 @@ def compact_folder_name_with_local_agent(base_name: str, labels: list[str], max_
 
     command_attempts: list[list[str]]
     if agent == "opencode":
-        command_attempts = [["opencode", "--prompt", prompt], ["opencode", "-p", prompt]]
+        command_attempts = [
+            ["opencode", "--variant", "medium", "--prompt", prompt],
+            ["opencode", "--variant", "medium", "-p", prompt],
+        ]
     elif agent == "claude":
         command_attempts = [["claude", "-p", prompt], ["claude", "--print", prompt]]
     else:
@@ -1139,6 +1142,7 @@ def consolidate_itinerary_landmark_names(
     command = ["opencode"]
     if opencode_model:
         command.extend(["-m", opencode_model])
+    command.extend(["--variant", "medium"])
     command.extend(["run", prompt])
 
     try:
