@@ -25,10 +25,11 @@ Supports resumable multi-day runs with a persistent state ledger.
 2. Sample 100% of eligible files.
 3. Group sampled coordinates into location sets using geo-first clustering.
 4. Resolve one landmark name per set from Nearby POI with priority: landmark > city > street.
-5. Order landmark names by set start time (itinerary order).
-6. Deduplicate repeated landmark names globally while preserving first occurrence.
-7. Do not enforce a hard limit on unique landmark names.
-8. When invoking `opencode` in this workflow, pass `--variant medium`.
+5. If the best-scored label is a numeric street name (for example `181st Avenue`), prefer a city label when available before falling back to that street label.
+6. Order landmark names by set start time (itinerary order).
+7. Deduplicate repeated landmark names globally while preserving first occurrence.
+8. Do not enforce a hard limit on unique landmark names.
+9. When invoking `opencode` in this workflow, pass `--variant medium`.
 
 ## Usage
 
