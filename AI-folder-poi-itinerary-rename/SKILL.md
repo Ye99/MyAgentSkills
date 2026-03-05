@@ -94,7 +94,7 @@ python3 scripts/rename_folder_by_ai_itinerary.py "/path/to/2025_07_23" --apply
 
 Defaults:
 
-- `--ratio 1.0` (100% sampling)
+- `--ratio 1.0` (100% sampling, must be in `(0, 1]`)
 - `--cluster-distance-m 2000`
 - `--opencode-timeout-sec 180`
 - `--opencode-max-attempts 5`
@@ -105,6 +105,7 @@ Defaults:
 
 - Report folders renamed/planned/skipped.
 - Report files missing GPS separately.
+- In split/apply output, check `leftover_media_count` and `invalid_source_media_count` to confirm no unsafe external-source moves occurred.
 - Confirm `used_reverse_geocoding` is `false` in output.
 - For tree runs, check `.ai-itinerary-tree-report.json` (summary) and `.ai-itinerary-tree-state.json` (detailed per-folder log).
 - Confirm integrity check fields show `passed: true`, `math_logic_ok: true`, and `target_folder_count_ok: true` for apply runs.

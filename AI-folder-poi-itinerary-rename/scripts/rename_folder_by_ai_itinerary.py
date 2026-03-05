@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -13,6 +14,7 @@ import subprocess
 import time
 import unicodedata
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -45,11 +47,22 @@ class MediaPoint:
 @dataclass
 class LocationCluster:
     points: list[MediaPoint]
+    lat_sum: float = field(init=False, repr=False)
+    lon_sum: float = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.lat_sum = sum(point.lat for point in self.points)
+        self.lon_sum = sum(point.lon for point in self.points)
+
+    def add_point(self, point: MediaPoint) -> None:
+        self.points.append(point)
+        self.lat_sum += point.lat
+        self.lon_sum += point.lon
 
     @property
     def centroid(self) -> tuple[float, float]:
-        lat = sum(point.lat for point in self.points) / len(self.points)
-        lon = sum(point.lon for point in self.points) / len(self.points)
+        lat = self.lat_sum / len(self.points)
+        lon = self.lon_sum / len(self.points)
         return lat, lon
 
     @property
@@ -144,13 +157,15 @@ def extract_media_points(folder: Path) -> tuple[list[MediaPoint], list[str]]:
     for record in records:
         if not isinstance(record, dict):
             continue
-        src = str(record.get("SourceFile", ""))
+        raw_source = record.get("SourceFile")
+        src = raw_source.strip() if isinstance(raw_source, str) else ""
+        if not src:
+            continue
         lat = record.get("GPSLatitude")
         lon = record.get("GPSLongitude")
         timestamp = _extract_timestamp(record)
         if not isinstance(lat, (float, int)) or not isinstance(lon, (float, int)):
-            if src:
-                without_gps.append(src)
+            without_gps.append(src)
             continue
         if timestamp is None:
             timestamp = datetime.min
@@ -183,14 +198,26 @@ def sample_points(points: list[MediaPoint], ratio: float) -> list[MediaPoint]:
     return [points[idx] for idx in indexes]
 
 
+def build_input_fingerprint(points: list[MediaPoint], without_gps: list[str]) -> str:
+    digest = hashlib.sha256()
+    for source in sorted(point.source_file for point in points):
+        digest.update(source.encode("utf-8"))
+        digest.update(b"\n")
+    for source in sorted(without_gps):
+        digest.update(source.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def cluster_media_points(
     points: list[MediaPoint],
     cluster_distance_m: float,
+    already_sorted: bool = False,
 ) -> list[LocationCluster]:
     if not points:
         return []
 
-    ordered = sorted(points, key=lambda p: p.timestamp)
+    ordered = points if already_sorted else sorted(points, key=lambda p: p.timestamp)
 
     clusters: list[LocationCluster] = [LocationCluster(points=[ordered[0]])]
     for point in ordered[1:]:
@@ -198,7 +225,7 @@ def cluster_media_points(
         centroid_lat, centroid_lon = current.centroid
         distance = haversine_m(point.lat, point.lon, centroid_lat, centroid_lon)
         if distance <= cluster_distance_m:
-            current.points.append(point)
+            current.add_point(point)
             continue
         clusters.append(LocationCluster(points=[point]))
 
@@ -310,6 +337,16 @@ def default_tree_report_file(root: Path) -> Path:
     return root / ".ai-itinerary-tree-report.json"
 
 
+_OPENCODE_AVAILABLE: bool | None = None
+
+
+def has_opencode_command() -> bool:
+    global _OPENCODE_AVAILABLE
+    if _OPENCODE_AVAILABLE is None:
+        _OPENCODE_AVAILABLE = shutil.which("opencode") is not None
+    return _OPENCODE_AVAILABLE
+
+
 def _run_opencode_with_retry(
     command: list[str],
     timeout_sec: int,
@@ -414,7 +451,7 @@ def infer_landmark_info(
         return cache[rounded]
 
     result: dict[str, str] = {"landmark": UNKNOWN_LANDMARK, "country": "UnknownCountry"}
-    if shutil.which("opencode") is not None:
+    if has_opencode_command():
         prompt = (
             "Infer one well-known landmark and country near the provided coordinates using general geographic knowledge only. "
             "Do not call any reverse geocoding service. "
@@ -691,6 +728,20 @@ def _safe_move_media_file(source_file: Path, source_root: Path, target_root: Pat
         counter += 1
 
 
+def is_safe_source_for_move(source_file: Path, source_root: Path) -> bool:
+    try:
+        resolved_source = source_file.resolve(strict=True)
+    except OSError:
+        return False
+    if not resolved_source.is_file():
+        return False
+    try:
+        resolved_source.relative_to(source_root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _date_prefix_from_folder(folder: Path) -> str:
     match = DATE_PREFIX_RE.match(folder.name)
     if not match:
@@ -700,11 +751,12 @@ def _date_prefix_from_folder(folder: Path) -> str:
 
 def discover_day_folders(root: Path) -> list[Path]:
     discovered: list[Path] = []
-    for path in sorted(root.rglob("*")):
+    for path in root.rglob("*"):
         if not path.is_dir():
             continue
         if DAY_FOLDER_EXACT_RE.match(path.name):
             discovered.append(path)
+    discovered.sort()
     return discovered
 
 
@@ -918,9 +970,10 @@ def rename_folder_from_itinerary(
     }
 
     points, without_gps = extract_media_points(folder)
+    input_fingerprint = build_input_fingerprint(points, without_gps)
     sampled_points = sample_points(points, ratio=ratio)
 
-    sampled_clusters = cluster_media_points(sampled_points, cluster_distance_m=cluster_distance_m)
+    sampled_clusters = cluster_media_points(sampled_points, cluster_distance_m=cluster_distance_m, already_sorted=True)
     previous_state = read_json_file(state_file) if resume else None
     completed_infos: list[dict[str, str]] = []
     persistent_failure_log: list[dict[str, Any]] = []
@@ -928,6 +981,7 @@ def rename_folder_from_itinerary(
         if (
             previous_state.get("folder_path") == str(folder)
             and previous_state.get("config") == current_config
+            and previous_state.get("input_fingerprint") == input_fingerprint
         ):
             raw_infos = previous_state.get("completed_cluster_infos")
             if isinstance(raw_infos, list):
@@ -983,6 +1037,7 @@ def rename_folder_from_itinerary(
                 "folder_path": str(folder),
                 "status": "failed-inference",
                 "config": current_config,
+                "input_fingerprint": input_fingerprint,
                 "next_cluster_index": idx,
                 "completed_cluster_infos": [info for _cluster, info in cluster_infos],
                 "persistent_failure_count": len(persistent_failure_log),
@@ -1028,6 +1083,7 @@ def rename_folder_from_itinerary(
             "folder_path": str(folder),
             "status": "in-progress",
             "config": current_config,
+            "input_fingerprint": input_fingerprint,
             "next_cluster_index": idx + 1,
             "completed_cluster_infos": [info for _cluster, info in cluster_infos],
             "persistent_failure_count": len(persistent_failure_log),
@@ -1035,9 +1091,12 @@ def rename_folder_from_itinerary(
         }
         write_json_file(state_file, state_payload)
 
+    leftover_media_examples = list(without_gps[:20])
+    invalid_source_media: list[str] = []
+
     country_groups = group_clusters_by_country(cluster_infos)
     if len(country_groups) > 1:
-        full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m)
+        full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m, already_sorted=True)
         country_centroids: list[tuple[float, float]] = []
         for group in country_groups:
             group_points: list[MediaPoint] = []
@@ -1090,7 +1149,8 @@ def rename_folder_from_itinerary(
                 for full_cluster in assigned_full_clusters[idx - 1]:
                     for point in full_cluster.points:
                         source_file = Path(point.source_file)
-                        if not source_file.exists():
+                        if not is_safe_source_for_move(source_file, folder):
+                            invalid_source_media.append(str(source_file))
                             continue
                         _safe_move_media_file(source_file, folder, target_path)
                         moved_file_count += 1
@@ -1110,11 +1170,14 @@ def rename_folder_from_itinerary(
             "folder_path": str(folder),
             "status": "completed",
             "config": current_config,
+            "input_fingerprint": input_fingerprint,
             "completed_cluster_infos": [info for _cluster, info in cluster_infos],
             "persistent_failure_count": len(persistent_failure_log),
             "persistent_failure_log": persistent_failure_log,
             "result_status": status,
+            "invalid_source_media_count": len(invalid_source_media),
         }
+        combined_leftover = leftover_media_examples + invalid_source_media
         write_json_file(state_file, completion_state)
         write_json_file(
             report_file,
@@ -1123,6 +1186,9 @@ def rename_folder_from_itinerary(
                 "folder_path": str(folder),
                 "state_file": str(state_file),
                 "split_folder_count": len(split_folders),
+                "leftover_media_count": len(without_gps) + len(invalid_source_media),
+                "leftover_media_examples": combined_leftover[:20],
+                "invalid_source_media_count": len(invalid_source_media),
                 "persistent_failure_summary": {
                     "persistent_failure_count": len(persistent_failure_log),
                 },
@@ -1137,11 +1203,15 @@ def rename_folder_from_itinerary(
             "media_with_gps_sampled": len(sampled_points),
             "sample_ratio_requested": ratio,
             "media_without_gps_count": len(without_gps),
+            "leftover_media_count": len(without_gps) + len(invalid_source_media),
+            "leftover_media_examples": combined_leftover[:20],
+            "invalid_source_media_count": len(invalid_source_media),
+            "invalid_source_media_examples": invalid_source_media[:20],
             "moved_media_with_gps_count": moved_file_count,
             "used_reverse_geocoding": False,
         }
 
-    full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m)
+    full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m, already_sorted=True)
     landmarks = rank_landmarks_by_location_set_size(
         reference_clusters=cluster_infos,
         full_clusters=full_clusters,
@@ -1161,11 +1231,13 @@ def rename_folder_from_itinerary(
         "folder_path": str(folder),
         "status": "completed",
         "config": current_config,
+        "input_fingerprint": input_fingerprint,
         "completed_cluster_infos": [info for _cluster, info in cluster_infos],
         "persistent_failure_count": len(persistent_failure_log),
         "persistent_failure_log": persistent_failure_log,
         "result_status": status,
         "target_name": target_path.name,
+        "leftover_media_count": len(without_gps),
     }
     write_json_file(state_file, completion_state)
     write_json_file(
@@ -1175,6 +1247,8 @@ def rename_folder_from_itinerary(
             "folder_path": str(folder),
             "state_file": str(state_file),
             "target_name": target_path.name,
+            "leftover_media_count": len(without_gps),
+            "leftover_media_examples": leftover_media_examples,
             "persistent_failure_summary": {
                 "persistent_failure_count": len(persistent_failure_log),
             },
@@ -1190,15 +1264,32 @@ def rename_folder_from_itinerary(
         "media_with_gps_sampled": len(sampled_points),
         "sample_ratio_requested": ratio,
         "media_without_gps_count": len(without_gps),
+        "leftover_media_count": len(without_gps),
+        "leftover_media_examples": leftover_media_examples,
         "used_reverse_geocoding": False,
     }
+
+
+def parse_ratio_arg(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("ratio must be a float in (0, 1]") from exc
+    if value <= 0.0 or value > 1.0:
+        raise argparse.ArgumentTypeError("ratio must be in (0, 1]")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rename folder using AI-inferred itinerary landmarks")
     parser.add_argument("folder", help="Path to day folder (YYYY_MM_DD...) or tree root containing day folders")
     parser.add_argument("--apply", action="store_true", help="Apply rename instead of dry-run")
-    parser.add_argument("--ratio", type=float, default=1.0, help="Sampling ratio for GPS media (0-1], default 1.0")
+    parser.add_argument(
+        "--ratio",
+        type=parse_ratio_arg,
+        default=1.0,
+        help="Sampling ratio for GPS media (0-1], default 1.0",
+    )
     parser.add_argument(
         "--cluster-distance-m",
         type=float,
