@@ -1,3 +1,4 @@
+import json
 import subprocess
 import unittest
 from datetime import datetime
@@ -15,6 +16,31 @@ import rename_folder_by_ai_itinerary as mod
 
 
 class RenameFolderByAiItineraryTests(unittest.TestCase):
+    def test_extract_media_points_skips_records_with_missing_sourcefile(self) -> None:
+        records = [
+            {
+                "GPSLatitude": 36.0670,
+                "GPSLongitude": 120.3150,
+                "DateTimeOriginal": "2025:07:23 09:00:00",
+            },
+            {
+                "SourceFile": "/tmp/day/a.jpg",
+                "GPSLatitude": 64.2500,
+                "GPSLongitude": -15.2040,
+                "DateTimeOriginal": "2025:07:23 10:00:00",
+            },
+        ]
+
+        with patch(
+            "rename_folder_by_ai_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["exiftool"], returncode=0, stdout=json.dumps(records), stderr=""),
+        ):
+            points, without_gps = mod.extract_media_points(Path("/tmp/day"))
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].source_file, "/tmp/day/a.jpg")
+        self.assertEqual(without_gps, [])
+
     def test_parse_json_payload_accepts_wrapped_output(self) -> None:
         payload = mod.parse_json_payload('notes\n{"landmark_name":"Skogafoss"}\nmore')
         self.assertEqual(payload, {"landmark_name": "Skogafoss"})
@@ -119,6 +145,15 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "split_by_location"))
         self.assertFalse(hasattr(args, "opencode_retries"))
         self.assertFalse(hasattr(args, "opencode_backoff_sec"))
+
+    def test_build_parser_rejects_invalid_ratio_values(self) -> None:
+        parser = mod.build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--ratio", "0"])
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--ratio", "1.1"])
 
     def test_group_clusters_by_country_keeps_first_seen_country_order(self) -> None:
         cluster_a = mod.LocationCluster(
@@ -308,6 +343,104 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
             self.assertIsInstance(final_state, dict)
             final_state_dict = cast(dict[str, object], final_state)
             self.assertEqual(final_state_dict["persistent_failure_count"], 1)
+
+    def test_resume_ignores_completed_clusters_when_input_fingerprint_changes(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 64.2500, -15.2040, datetime(2025, 7, 23, 10, 0, 0)),
+            ]
+
+            stale_state = {
+                "folder_path": str(day),
+                "status": "in-progress",
+                "config": {
+                    "ratio": 1.0,
+                    "cluster_distance_m": 2_000.0,
+                    "max_landmarks": 8,
+                },
+                "input_fingerprint": "stale-fingerprint",
+                "next_cluster_index": 1,
+                "completed_cluster_infos": [{"landmark": "StaleSpot", "country": "China"}],
+                "persistent_failure_count": 0,
+                "persistent_failure_log": [],
+            }
+            mod.write_json_file(mod.default_state_file(day), stale_state)
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "FreshSpotA", "country": "China"},
+                        {"landmark": "FreshSpotB", "country": "China"},
+                    ],
+                ) as infer_mock:
+                    result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0)
+
+        self.assertEqual(result["status"], "planned-rename")
+        self.assertEqual(infer_mock.call_count, 2)
+
+    def test_rename_folder_split_reports_leftover_non_gps_files(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "nogps.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 36.0680, 120.3160, datetime(2025, 7, 23, 9, 1, 0)),
+                mod.MediaPoint(str(day / "c.jpg"), 64.2500, -15.2040, datetime(2025, 7, 23, 10, 0, 0)),
+                mod.MediaPoint(str(day / "d.jpg"), 64.2510, -15.2050, datetime(2025, 7, 23, 10, 1, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [str(day / "nogps.jpg")])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "MayFourthSquare", "country": "China"},
+                        {"landmark": "Jokulsarlon", "country": "Iceland"},
+                    ],
+                ):
+                    result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0)
+
+        self.assertEqual(result["status"], "planned-split")
+        self.assertEqual(result["leftover_media_count"], 1)
+        self.assertEqual(result["leftover_media_examples"], [str(day / "nogps.jpg")])
+
+    def test_split_apply_does_not_move_sources_outside_day_folder(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            day = root / "2025_07_23"
+            day.mkdir()
+            inside_file = day / "inside.jpg"
+            outside_file = root / "outside.jpg"
+            inside_file.write_bytes(b"x")
+            outside_file.write_bytes(b"y")
+
+            points = [
+                mod.MediaPoint(str(inside_file), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(outside_file), 64.2500, -15.2040, datetime(2025, 7, 23, 10, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "MayFourthSquare", "country": "China"},
+                        {"landmark": "Jokulsarlon", "country": "Iceland"},
+                    ],
+                ):
+                    result = mod.rename_folder_from_itinerary(day, apply=True, ratio=1.0)
+
+            self.assertEqual(result["status"], "split-renamed")
+            self.assertTrue(outside_file.exists())
+            self.assertGreaterEqual(cast(int, result["invalid_source_media_count"]), 1)
 
     def test_build_target_folder_name_uses_comma_join(self) -> None:
         target = mod.build_target_folder_name("2025_07_24", ["Magnusarfoss", "Fjarargljufur", "VikChurch"])
