@@ -200,8 +200,13 @@ def sample_points(points: list[MediaPoint], ratio: float) -> list[MediaPoint]:
 
 def build_input_fingerprint(points: list[MediaPoint], without_gps: list[str]) -> str:
     digest = hashlib.sha256()
-    for source in sorted(point.source_file for point in points):
-        digest.update(source.encode("utf-8"))
+    sortable_points = sorted(points, key=lambda p: (p.source_file, p.timestamp.isoformat(), p.lat, p.lon))
+    for point in sortable_points:
+        digest.update(point.source_file.encode("utf-8"))
+        digest.update(b"\n")
+        digest.update(f"{point.lat:.6f},{point.lon:.6f}".encode("ascii"))
+        digest.update(b"\n")
+        digest.update(point.timestamp.isoformat().encode("ascii"))
         digest.update(b"\n")
     for source in sorted(without_gps):
         digest.update(source.encode("utf-8"))
@@ -230,53 +235,6 @@ def cluster_media_points(
         clusters.append(LocationCluster(points=[point]))
 
     return clusters
-
-
-def group_points_by_distance(points: list[MediaPoint], split_distance_m: float) -> list[list[MediaPoint]]:
-    if not points:
-        return []
-
-    ordered = sorted(points, key=lambda p: p.timestamp)
-    groups: list[list[MediaPoint]] = []
-
-    for point in ordered:
-        best_group_idx: int | None = None
-        best_distance = float("inf")
-        for idx, group in enumerate(groups):
-            c_lat, c_lon = _points_centroid(group)
-            distance = haversine_m(point.lat, point.lon, c_lat, c_lon)
-            if distance < best_distance:
-                best_distance = distance
-                best_group_idx = idx
-
-        if best_group_idx is None or best_distance > split_distance_m:
-            groups.append([point])
-            continue
-
-        groups[best_group_idx].append(point)
-
-    groups.sort(key=lambda group: min(point.timestamp for point in group))
-    return groups
-
-
-def assign_points_to_group_centroids(
-    points: list[MediaPoint],
-    group_centroids: list[tuple[float, float]],
-) -> list[list[MediaPoint]]:
-    assigned: list[list[MediaPoint]] = [[] for _ in group_centroids]
-    if not group_centroids:
-        return assigned
-
-    for point in points:
-        best_idx = 0
-        best_distance = float("inf")
-        for idx, (c_lat, c_lon) in enumerate(group_centroids):
-            distance = haversine_m(point.lat, point.lon, c_lat, c_lon)
-            if distance < best_distance:
-                best_distance = distance
-                best_idx = idx
-        assigned[best_idx].append(point)
-    return assigned
 
 
 def parse_json_payload(stdout: str) -> dict[str, Any] | None:
@@ -728,15 +686,16 @@ def _safe_move_media_file(source_file: Path, source_root: Path, target_root: Pat
         counter += 1
 
 
-def is_safe_source_for_move(source_file: Path, source_root: Path) -> bool:
+def is_safe_source_for_move(source_file: Path, source_root: Path, resolved_source_root: Path | None = None) -> bool:
     try:
         resolved_source = source_file.resolve(strict=True)
     except OSError:
         return False
     if not resolved_source.is_file():
         return False
+    resolved_root = resolved_source_root or source_root.resolve()
     try:
-        resolved_source.relative_to(source_root.resolve())
+        resolved_source.relative_to(resolved_root)
     except ValueError:
         return False
     return True
@@ -967,6 +926,10 @@ def rename_folder_from_itinerary(
         "ratio": ratio,
         "cluster_distance_m": cluster_distance_m,
         "max_landmarks": max_landmarks,
+        "opencode_timeout_sec": opencode_timeout_sec,
+        "opencode_max_attempts": opencode_retries,
+        "opencode_initial_backoff_sec": opencode_backoff_sec,
+        "opencode_model": opencode_model,
     }
 
     points, without_gps = extract_media_points(folder)
@@ -1097,6 +1060,7 @@ def rename_folder_from_itinerary(
     country_groups = group_clusters_by_country(cluster_infos)
     if len(country_groups) > 1:
         full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m, already_sorted=True)
+        resolved_folder = folder.resolve()
         country_centroids: list[tuple[float, float]] = []
         for group in country_groups:
             group_points: list[MediaPoint] = []
@@ -1145,14 +1109,69 @@ def rename_folder_from_itinerary(
             }
 
             if apply:
-                target_path.mkdir(parents=True, exist_ok=True)
+                created_target = False
                 for full_cluster in assigned_full_clusters[idx - 1]:
                     for point in full_cluster.points:
                         source_file = Path(point.source_file)
-                        if not is_safe_source_for_move(source_file, folder):
+                        if not is_safe_source_for_move(source_file, folder, resolved_source_root=resolved_folder):
                             invalid_source_media.append(str(source_file))
                             continue
-                        _safe_move_media_file(source_file, folder, target_path)
+                        if not created_target:
+                            target_path.mkdir(parents=True, exist_ok=True)
+                            created_target = True
+                        try:
+                            _safe_move_media_file(source_file, folder, target_path)
+                        except OSError as exc:
+                            error_payload = {
+                                "message": str(exc),
+                                "failed_source_file": str(source_file),
+                            }
+                            failure_state: dict[str, Any] = {
+                                "folder_path": str(folder),
+                                "status": "failed-apply",
+                                "config": current_config,
+                                "input_fingerprint": input_fingerprint,
+                                "completed_cluster_infos": [info for _cluster, info in cluster_infos],
+                                "persistent_failure_count": len(persistent_failure_log),
+                                "persistent_failure_log": persistent_failure_log,
+                                "error": error_payload,
+                                "moved_media_with_gps_count": moved_file_count,
+                                "invalid_source_media_count": len(invalid_source_media),
+                            }
+                            write_json_file(state_file, failure_state)
+                            combined_leftover = leftover_media_examples + invalid_source_media
+                            write_json_file(
+                                report_file,
+                                {
+                                    "status": "failed-apply",
+                                    "folder_path": str(folder),
+                                    "state_file": str(state_file),
+                                    "error": error_payload,
+                                    "moved_media_with_gps_count": moved_file_count,
+                                    "leftover_media_count": len(without_gps) + len(invalid_source_media),
+                                    "leftover_media_examples": combined_leftover[:20],
+                                    "invalid_source_media_count": len(invalid_source_media),
+                                    "persistent_failure_summary": {
+                                        "persistent_failure_count": len(persistent_failure_log),
+                                    },
+                                },
+                            )
+                            return {
+                                "folder_path": str(folder),
+                                "status": "failed-apply",
+                                "state_file": str(state_file),
+                                "report_file": str(report_file),
+                                "error": error_payload,
+                                "media_with_gps_count": len(points),
+                                "media_with_gps_sampled": len(sampled_points),
+                                "sample_ratio_requested": ratio,
+                                "media_without_gps_count": len(without_gps),
+                                "leftover_media_count": len(without_gps) + len(invalid_source_media),
+                                "leftover_media_examples": combined_leftover[:20],
+                                "invalid_source_media_count": len(invalid_source_media),
+                                "moved_media_with_gps_count": moved_file_count,
+                                "used_reverse_geocoding": False,
+                            }
                         moved_file_count += 1
 
             split_folders.append(entry)
@@ -1280,6 +1299,36 @@ def parse_ratio_arg(raw_value: str) -> float:
     return value
 
 
+def parse_positive_float_arg(raw_value: str, *, name: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+    if value <= 0.0:
+        raise argparse.ArgumentTypeError(f"{name} must be > 0")
+    return value
+
+
+def parse_non_negative_float_arg(raw_value: str, *, name: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+    if value < 0.0:
+        raise argparse.ArgumentTypeError(f"{name} must be >= 0")
+    return value
+
+
+def parse_positive_int_arg(raw_value: str, *, name: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{name} must be >= 1")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rename folder using AI-inferred itinerary landmarks")
     parser.add_argument("folder", help="Path to day folder (YYYY_MM_DD...) or tree root containing day folders")
@@ -1292,7 +1341,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cluster-distance-m",
-        type=float,
+        type=lambda raw: parse_positive_float_arg(raw, name="cluster-distance-m"),
         default=2_000.0,
         help="Distance threshold in meters for itinerary clustering",
     )
@@ -1304,19 +1353,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opencode-max-attempts",
-        type=int,
+        type=lambda raw: parse_positive_int_arg(raw, name="opencode-max-attempts"),
         default=5,
         help="Retry attempts for opencode landmark inference",
     )
     parser.add_argument(
         "--opencode-initial-backoff-sec",
-        type=float,
+        type=lambda raw: parse_non_negative_float_arg(raw, name="opencode-initial-backoff-sec"),
         default=3.0,
         help="Initial backoff seconds (exponential) between opencode retries",
     )
     parser.add_argument(
         "--max-landmarks",
-        type=int,
+        type=lambda raw: parse_positive_int_arg(raw, name="max-landmarks"),
         default=8,
         help="Maximum number of landmarks kept in final day folder name",
     )
@@ -1362,6 +1411,8 @@ def main() -> int:
             resume=not args.no_resume,
         )
     else:
+        if args.state_file or args.report_file:
+            parser.error("--state-file and --report-file are only supported for single day folder input")
         result = process_folder_tree(
             root=folder,
             apply=args.apply,

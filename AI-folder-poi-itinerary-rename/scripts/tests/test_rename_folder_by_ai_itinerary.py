@@ -16,6 +16,20 @@ import rename_folder_by_ai_itinerary as mod
 
 
 class RenameFolderByAiItineraryTests(unittest.TestCase):
+    def test_build_input_fingerprint_changes_when_media_metadata_changes(self) -> None:
+        source = "/tmp/day/a.jpg"
+        points_a = [
+            mod.MediaPoint(source, 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+        ]
+        points_b = [
+            mod.MediaPoint(source, 36.0671, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+        ]
+
+        fingerprint_a = mod.build_input_fingerprint(points_a, without_gps=[])
+        fingerprint_b = mod.build_input_fingerprint(points_b, without_gps=[])
+
+        self.assertNotEqual(fingerprint_a, fingerprint_b)
+
     def test_extract_media_points_skips_records_with_missing_sourcefile(self) -> None:
         records = [
             {
@@ -154,6 +168,21 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             parser.parse_args(["/tmp/2025_07_24", "--ratio", "1.1"])
+
+    def test_build_parser_rejects_invalid_numeric_values(self) -> None:
+        parser = mod.build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--cluster-distance-m", "0"])
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--max-landmarks", "0"])
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--opencode-max-attempts", "0"])
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--opencode-initial-backoff-sec", "-1"])
 
     def test_group_clusters_by_country_keeps_first_seen_country_order(self) -> None:
         cluster_a = mod.LocationCluster(
@@ -363,6 +392,10 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                     "ratio": 1.0,
                     "cluster_distance_m": 2_000.0,
                     "max_landmarks": 8,
+                    "opencode_timeout_sec": 180,
+                    "opencode_max_attempts": 5,
+                    "opencode_initial_backoff_sec": 3.0,
+                    "opencode_model": None,
                 },
                 "input_fingerprint": "stale-fingerprint",
                 "next_cluster_index": 1,
@@ -441,6 +474,63 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
             self.assertEqual(result["status"], "split-renamed")
             self.assertTrue(outside_file.exists())
             self.assertGreaterEqual(cast(int, result["invalid_source_media_count"]), 1)
+
+    def test_split_apply_returns_failed_apply_when_move_raises(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            inside_a = day / "inside_a.jpg"
+            inside_b = day / "inside_b.jpg"
+            inside_a.write_bytes(b"x")
+            inside_b.write_bytes(b"y")
+
+            points = [
+                mod.MediaPoint(str(inside_a), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(inside_b), 64.2500, -15.2040, datetime(2025, 7, 23, 10, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "MayFourthSquare", "country": "China"},
+                        {"landmark": "Jokulsarlon", "country": "Iceland"},
+                    ],
+                ):
+                    with patch(
+                        "rename_folder_by_ai_itinerary._safe_move_media_file",
+                        side_effect=OSError("disk full"),
+                    ):
+                        result = mod.rename_folder_from_itinerary(day, apply=True, ratio=1.0)
+
+            report = mod.read_json_file(mod.default_report_file(day))
+
+        self.assertEqual(result["status"], "failed-apply")
+        self.assertIsInstance(report, dict)
+        self.assertEqual(cast(dict[str, object], report)["status"], "failed-apply")
+
+    def test_main_rejects_state_or_report_file_for_tree_mode(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            argv_state = [
+                "rename_folder_by_ai_itinerary.py",
+                str(root),
+                "--state-file",
+                str(root / "custom-state.json"),
+            ]
+            with patch.object(sys, "argv", argv_state):
+                with self.assertRaises(SystemExit):
+                    mod.main()
+
+            argv_report = [
+                "rename_folder_by_ai_itinerary.py",
+                str(root),
+                "--report-file",
+                str(root / "custom-report.json"),
+            ]
+            with patch.object(sys, "argv", argv_report):
+                with self.assertRaises(SystemExit):
+                    mod.main()
 
     def test_build_target_folder_name_uses_comma_join(self) -> None:
         target = mod.build_target_folder_name("2025_07_24", ["Magnusarfoss", "Fjarargljufur", "VikChurch"])
