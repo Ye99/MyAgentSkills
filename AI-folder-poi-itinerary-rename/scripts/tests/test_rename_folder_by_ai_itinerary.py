@@ -184,6 +184,9 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["/tmp/2025_07_24", "--opencode-initial-backoff-sec", "-1"])
 
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--opencode-timeout-sec", "0"])
+
     def test_group_clusters_by_country_keeps_first_seen_country_order(self) -> None:
         cluster_a = mod.LocationCluster(
             points=[mod.MediaPoint("a.jpg", 10.0, 10.0, datetime(2025, 7, 23, 9, 0, 0))]
@@ -245,6 +248,31 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 "2025_07_23_Berufjordur,Vatnajokull",
             ],
         )
+
+    def test_unknown_country_does_not_force_split_when_only_one_known_country(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 37.1000, 121.2000, datetime(2025, 7, 23, 10, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "MayFourthSquare", "country": "China"},
+                        {"landmark": "UnknownLandmark", "country": "UnknownCountry"},
+                    ],
+                ):
+                    result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0, cluster_distance_m=10)
+
+        self.assertEqual(result["status"], "planned-rename")
+        self.assertEqual(result["landmarks"], ["MayFourthSquare"])
 
     def test_rename_folder_applies_max_landmarks_ranked_by_media_count(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -333,6 +361,26 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         summary = cast(dict[str, object], report_dict["persistent_failure_summary"])
         self.assertEqual(summary["persistent_failure_count"], 1)
         self.assertEqual(summary["last_failed_cluster_index"], 1)
+
+    def test_failed_extract_writes_state_and_report_without_rename(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+
+            with patch(
+                "rename_folder_by_ai_itinerary.extract_media_points",
+                side_effect=subprocess.CalledProcessError(returncode=1, cmd=["exiftool"], stderr="boom"),
+            ):
+                result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0)
+
+            state = mod.read_json_file(mod.default_state_file(day))
+            report = mod.read_json_file(mod.default_report_file(day))
+
+        self.assertEqual(result["status"], "failed-extract")
+        self.assertIsInstance(state, dict)
+        self.assertEqual(cast(dict[str, object], state)["status"], "failed-extract")
+        self.assertIsInstance(report, dict)
+        self.assertEqual(cast(dict[str, object], report)["status"], "failed-extract")
 
     def test_resume_uses_saved_state_and_completes(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -446,6 +494,32 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(result["leftover_media_count"], 1)
         self.assertEqual(result["leftover_media_examples"], [str(day / "nogps.jpg")])
 
+    def test_split_mode_skips_unknown_landmark_placeholder(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 64.2500, -15.2040, datetime(2025, 7, 23, 10, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "UnknownLandmark", "country": "China"},
+                        {"landmark": "UnknownLandmark", "country": "Iceland"},
+                    ],
+                ):
+                    result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0)
+
+        self.assertEqual(result["status"], "planned-split")
+        split_folders = cast(list[dict[str, object]], result["split_folders"])
+        self.assertEqual([str(entry["target_name"]) for entry in split_folders], ["2025_07_23", "2025_07_23_2"])
+
     def test_split_apply_does_not_move_sources_outside_day_folder(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -509,6 +583,30 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertIsInstance(report, dict)
         self.assertEqual(cast(dict[str, object], report)["status"], "failed-apply")
 
+    def test_single_folder_apply_returns_failed_rename_when_rename_raises(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_23"
+            day.mkdir()
+            photo = day / "a.jpg"
+            photo.write_bytes(b"x")
+            points = [
+                mod.MediaPoint(str(photo), 36.0670, 120.3150, datetime(2025, 7, 23, 9, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    return_value={"landmark": "MayFourthSquare", "country": "China"},
+                ):
+                    with patch("pathlib.Path.rename", side_effect=OSError("perm denied")):
+                        result = mod.rename_folder_from_itinerary(day, apply=True, ratio=1.0)
+
+            report = mod.read_json_file(mod.default_report_file(day))
+
+        self.assertEqual(result["status"], "failed-rename")
+        self.assertIsInstance(report, dict)
+        self.assertEqual(cast(dict[str, object], report)["status"], "failed-rename")
+
     def test_main_rejects_state_or_report_file_for_tree_mode(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -529,6 +627,32 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 str(root / "custom-report.json"),
             ]
             with patch.object(sys, "argv", argv_report):
+                with self.assertRaises(SystemExit):
+                    mod.main()
+
+    def test_main_treats_date_prefixed_root_with_day_children_as_tree(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "2025_07_23_batch"
+            day = root / "2025_07_24"
+            day.mkdir(parents=True)
+
+            argv = ["rename_folder_by_ai_itinerary.py", str(root)]
+            with patch.object(sys, "argv", argv):
+                with patch("rename_folder_by_ai_itinerary.process_folder_tree", return_value={"status": "completed"}) as tree_mock:
+                    with patch(
+                        "rename_folder_by_ai_itinerary.rename_folder_from_itinerary",
+                        return_value={"status": "planned-rename"},
+                    ) as rename_mock:
+                        mod.main()
+
+            tree_mock.assert_called_once()
+            rename_mock.assert_not_called()
+
+    def test_main_rejects_nonexistent_folder(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing"
+            argv = ["rename_folder_by_ai_itinerary.py", str(missing)]
+            with patch.object(sys, "argv", argv):
                 with self.assertRaises(SystemExit):
                     mod.main()
 
@@ -604,6 +728,26 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(cast(dict[str, object], tree_report)["failed_folder_count"], 1)
         self.assertIsInstance(tree_state, dict)
         self.assertEqual(cast(dict[str, object], tree_state)["total_folder_count"], 2)
+
+    def test_process_folder_tree_continues_after_failed_extract(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            day_a = root / "2025" / "2025_07_22"
+            day_b = root / "2025" / "2025_07_23"
+            day_a.mkdir(parents=True)
+            day_b.mkdir(parents=True)
+
+            def fake_extract(folder: Path) -> tuple[list[mod.MediaPoint], list[str]]:
+                if folder == day_a:
+                    raise subprocess.CalledProcessError(returncode=1, cmd=["exiftool"], stderr="broken")
+                return ([], [])
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", side_effect=fake_extract):
+                summary = mod.process_folder_tree(root, apply=False, ratio=1.0)
+
+        self.assertEqual(summary["total_folder_count"], 2)
+        self.assertEqual(summary["failed_folder_count"], 1)
+        self.assertEqual(summary["skipped_folder_count"], 1)
 
 
 if __name__ == "__main__":

@@ -577,6 +577,15 @@ def group_clusters_by_country(
     return groups
 
 
+def should_split_country_groups(country_groups: list[dict[str, Any]]) -> bool:
+    known_countries = {
+        str(group.get("country") or "UnknownCountry")
+        for group in country_groups
+        if str(group.get("country") or "UnknownCountry") != "UnknownCountry"
+    }
+    return len(known_countries) >= 2
+
+
 def select_top_landmarks_by_count(
     landmark_counts: dict[str, int],
     first_seen_order: dict[str, int],
@@ -710,11 +719,11 @@ def _date_prefix_from_folder(folder: Path) -> str:
 
 def discover_day_folders(root: Path) -> list[Path]:
     discovered: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_dir():
-            continue
-        if DAY_FOLDER_EXACT_RE.match(path.name):
-            discovered.append(path)
+    for dirpath, dirnames, _filenames in os.walk(root):
+        parent = Path(dirpath)
+        for dirname in dirnames:
+            if DAY_FOLDER_EXACT_RE.match(dirname):
+                discovered.append(parent / dirname)
     discovered.sort()
     return discovered
 
@@ -810,20 +819,48 @@ def process_folder_tree(
     folder_results: list[dict[str, Any]] = []
 
     for folder in day_folders:
-        result = rename_folder_from_itinerary(
-            folder=folder,
-            apply=apply,
-            ratio=ratio,
-            cluster_distance_m=cluster_distance_m,
-            max_landmarks=max_landmarks,
-            opencode_timeout_sec=opencode_timeout_sec,
-            opencode_retries=opencode_retries,
-            opencode_backoff_sec=opencode_backoff_sec,
-            opencode_model=opencode_model,
-            state_file=default_state_file(folder),
-            report_file=default_report_file(folder),
-            resume=resume,
-        )
+        try:
+            result = rename_folder_from_itinerary(
+                folder=folder,
+                apply=apply,
+                ratio=ratio,
+                cluster_distance_m=cluster_distance_m,
+                max_landmarks=max_landmarks,
+                opencode_timeout_sec=opencode_timeout_sec,
+                opencode_retries=opencode_retries,
+                opencode_backoff_sec=opencode_backoff_sec,
+                opencode_model=opencode_model,
+                state_file=default_state_file(folder),
+                report_file=default_report_file(folder),
+                resume=resume,
+            )
+        except Exception as exc:  # noqa: BLE001
+            write_json_file(
+                default_state_file(folder),
+                {
+                    "folder_path": str(folder),
+                    "status": "failed-exception",
+                    "error": {"message": str(exc)},
+                },
+            )
+            write_json_file(
+                default_report_file(folder),
+                {
+                    "folder_path": str(folder),
+                    "status": "failed-exception",
+                    "state_file": str(default_state_file(folder)),
+                    "error": {"message": str(exc)},
+                    "used_reverse_geocoding": False,
+                },
+            )
+            result = {
+                "folder_path": str(folder),
+                "status": "failed-exception",
+                "state_file": str(default_state_file(folder)),
+                "report_file": str(default_report_file(folder)),
+                "error": {"message": str(exc)},
+                "used_reverse_geocoding": False,
+            }
         if isinstance(result, dict):
             folder_results.append(result)
 
@@ -932,7 +969,47 @@ def rename_folder_from_itinerary(
         "opencode_model": opencode_model,
     }
 
-    points, without_gps = extract_media_points(folder)
+    try:
+        points, without_gps = extract_media_points(folder)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
+        error_payload: dict[str, Any] = {
+            "message": str(exc),
+            "failure_type": "extract-media",
+        }
+        failure_state: dict[str, Any] = {
+            "folder_path": str(folder),
+            "status": "failed-extract",
+            "config": current_config,
+            "error": error_payload,
+            "persistent_failure_count": 0,
+            "persistent_failure_log": [],
+        }
+        write_json_file(state_file, failure_state)
+        write_json_file(
+            report_file,
+            {
+                "status": "failed-extract",
+                "folder_path": str(folder),
+                "state_file": str(state_file),
+                "error": error_payload,
+                "persistent_failure_summary": {
+                    "persistent_failure_count": 0,
+                },
+                "used_reverse_geocoding": False,
+            },
+        )
+        return {
+            "folder_path": str(folder),
+            "status": "failed-extract",
+            "state_file": str(state_file),
+            "report_file": str(report_file),
+            "error": error_payload,
+            "media_with_gps_count": 0,
+            "media_with_gps_sampled": 0,
+            "sample_ratio_requested": ratio,
+            "media_without_gps_count": 0,
+            "used_reverse_geocoding": False,
+        }
     input_fingerprint = build_input_fingerprint(points, without_gps)
     sampled_points = sample_points(points, ratio=ratio)
 
@@ -1025,6 +1102,7 @@ def rename_folder_from_itinerary(
                 "next_cluster_index": idx,
                 "error": state_payload["error"],
                 "persistent_failure_summary": persistent_failure_summary,
+                "used_reverse_geocoding": False,
             }
             write_json_file(report_file, report_payload)
             return {
@@ -1058,7 +1136,7 @@ def rename_folder_from_itinerary(
     invalid_source_media: list[str] = []
 
     country_groups = group_clusters_by_country(cluster_infos)
-    if len(country_groups) > 1:
+    if should_split_country_groups(country_groups):
         full_clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m, already_sorted=True)
         resolved_folder = folder.resolve()
         country_centroids: list[tuple[float, float]] = []
@@ -1090,8 +1168,6 @@ def rename_folder_from_itinerary(
                 full_clusters=assigned_full_clusters[idx - 1],
                 max_landmarks=max_landmarks,
             )
-            if not landmarks:
-                landmarks = [f"UnknownSegment{idx}"]
 
             target_name = build_target_folder_name(date_prefix, landmarks)
             target_name = _unique_target_name(target_name, used_target_names)
@@ -1154,6 +1230,7 @@ def rename_folder_from_itinerary(
                                     "persistent_failure_summary": {
                                         "persistent_failure_count": len(persistent_failure_log),
                                     },
+                                    "used_reverse_geocoding": False,
                                 },
                             )
                             return {
@@ -1211,6 +1288,7 @@ def rename_folder_from_itinerary(
                 "persistent_failure_summary": {
                     "persistent_failure_count": len(persistent_failure_log),
                 },
+                "used_reverse_geocoding": False,
             },
         )
 
@@ -1243,8 +1321,58 @@ def rename_folder_from_itinerary(
     if not landmarks:
         status = "skipped-no-landmark"
     elif apply and target_path != folder:
-        folder.rename(target_path)
-        status = "renamed"
+        try:
+            folder.rename(target_path)
+            status = "renamed"
+        except OSError as exc:
+            error_payload = {
+                "message": str(exc),
+                "failure_type": "apply-rename",
+                "target_name": target_path.name,
+            }
+            failure_state: dict[str, Any] = {
+                "folder_path": str(folder),
+                "status": "failed-rename",
+                "config": current_config,
+                "input_fingerprint": input_fingerprint,
+                "completed_cluster_infos": [info for _cluster, info in cluster_infos],
+                "persistent_failure_count": len(persistent_failure_log),
+                "persistent_failure_log": persistent_failure_log,
+                "error": error_payload,
+                "target_name": target_path.name,
+            }
+            write_json_file(state_file, failure_state)
+            write_json_file(
+                report_file,
+                {
+                    "status": "failed-rename",
+                    "folder_path": str(folder),
+                    "state_file": str(state_file),
+                    "target_name": target_path.name,
+                    "error": error_payload,
+                    "leftover_media_count": len(without_gps),
+                    "leftover_media_examples": leftover_media_examples,
+                    "persistent_failure_summary": {
+                        "persistent_failure_count": len(persistent_failure_log),
+                    },
+                    "used_reverse_geocoding": False,
+                },
+            )
+            return {
+                "folder_path": str(folder),
+                "status": "failed-rename",
+                "state_file": str(state_file),
+                "report_file": str(report_file),
+                "target_name": target_path.name,
+                "error": error_payload,
+                "media_with_gps_count": len(points),
+                "media_with_gps_sampled": len(sampled_points),
+                "sample_ratio_requested": ratio,
+                "media_without_gps_count": len(without_gps),
+                "leftover_media_count": len(without_gps),
+                "leftover_media_examples": leftover_media_examples,
+                "used_reverse_geocoding": False,
+            }
 
     completion_state = {
         "folder_path": str(folder),
@@ -1271,6 +1399,7 @@ def rename_folder_from_itinerary(
             "persistent_failure_summary": {
                 "persistent_failure_count": len(persistent_failure_log),
             },
+            "used_reverse_geocoding": False,
         },
     )
 
@@ -1347,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opencode-timeout-sec",
-        type=int,
+        type=lambda raw: parse_positive_int_arg(raw, name="opencode-timeout-sec"),
         default=180,
         help="Timeout in seconds for each opencode landmark inference call",
     )
@@ -1395,7 +1524,14 @@ def main() -> int:
     args = parser.parse_args()
 
     folder = Path(args.folder).expanduser().resolve()
-    if DATE_PREFIX_RE.match(folder.name):
+    if not folder.exists() or not folder.is_dir():
+        parser.error("folder must exist and be a directory")
+
+    has_day_children = any(
+        child.is_dir() and DAY_FOLDER_EXACT_RE.match(child.name)
+        for child in folder.iterdir()
+    )
+    if DATE_PREFIX_RE.match(folder.name) and not has_day_children:
         result = rename_folder_from_itinerary(
             folder,
             apply=args.apply,
