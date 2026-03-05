@@ -100,6 +100,7 @@ Defaults:
 - `--opencode-max-attempts 5`
 - `--opencode-initial-backoff-sec 3.0` (exponential)
 - `--max-landmarks 8`
+- `--inference-workers 3` (parallel landmark inference workers)
 
 ## Verification
 

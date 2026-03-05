@@ -1,10 +1,12 @@
 import json
 import subprocess
+import time
 import unittest
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from typing import cast
 from unittest.mock import patch
 
@@ -16,6 +18,33 @@ import rename_folder_by_ai_itinerary as mod
 
 
 class RenameFolderByAiItineraryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._start_server_patch = patch(
+            "rename_folder_by_ai_itinerary.start_opencode_server",
+            side_effect=self._fake_start_opencode_server,
+        )
+        self._stop_server_patch = patch(
+            "rename_folder_by_ai_itinerary.stop_opencode_server",
+            return_value=None,
+        )
+        self._start_server_patch.start()
+        self._stop_server_patch.start()
+
+    def tearDown(self) -> None:
+        self._stop_server_patch.stop()
+        self._start_server_patch.stop()
+
+    @staticmethod
+    def _fake_start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> mod.OpencodeServerHandle:
+        _ = startup_timeout_sec
+        port = 4100 + worker_id
+        return mod.OpencodeServerHandle(
+            worker_id=worker_id,
+            port=port,
+            url=f"http://127.0.0.1:{port}",
+            process=None,
+        )
+
     def test_build_input_fingerprint_changes_when_media_metadata_changes(self) -> None:
         source = "/tmp/day/a.jpg"
         points_a = [
@@ -111,6 +140,59 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(info["country"], "Iceland")
         sleep_mock.assert_called_once_with(2.0)
 
+    def test_infer_landmark_info_attach_uses_http_endpoint_without_subprocess(self) -> None:
+        class FakeResponse:
+            def __init__(self, status: int, payload: dict[str, object]) -> None:
+                self.status = status
+                self._payload = payload
+
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode("utf-8")
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                _ = (exc_type, exc, tb)
+                return False
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
+            _ = timeout
+            url = request.full_url if hasattr(request, "full_url") else str(request)
+            if url.endswith("/session"):
+                return FakeResponse(200, {"id": "ses_test"})
+            if "/session/ses_test/message" in url:
+                return FakeResponse(
+                    200,
+                    {
+                        "info": {
+                            "structured": {
+                                "landmark_name": "Skogafoss",
+                                "country_name": "Iceland",
+                            }
+                        },
+                        "parts": [],
+                    },
+                )
+            raise AssertionError(f"unexpected url: {url}")
+
+        with patch("rename_folder_by_ai_itinerary.shutil.which", return_value="/usr/bin/opencode"):
+            with patch("rename_folder_by_ai_itinerary.subprocess.run") as run_mock:
+                with patch("rename_folder_by_ai_itinerary.urllib.request.urlopen", side_effect=fake_urlopen):
+                    diagnostics: dict[str, object] = {}
+                    info = mod.infer_landmark_info(
+                        63.5321,
+                        -19.5116,
+                        strict=True,
+                        opencode_attach_url="http://127.0.0.1:4100",
+                        diagnostics=diagnostics,
+                    )
+
+        self.assertEqual(info["landmark"], "Skogafoss")
+        self.assertEqual(info["country"], "Iceland")
+        self.assertEqual(diagnostics.get("opencode_session_id"), "ses_test")
+        run_mock.assert_not_called()
+
     def test_build_itinerary_landmarks_keeps_order_and_dedupes(self) -> None:
         points = [
             mod.MediaPoint("a.jpg", 10.0, 10.0, datetime(2025, 7, 24, 9, 0, 0)),
@@ -154,6 +236,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(args.opencode_max_attempts, 5)
         self.assertEqual(args.opencode_initial_backoff_sec, 3.0)
         self.assertEqual(args.max_landmarks, 8)
+        self.assertEqual(args.inference_workers, 3)
         self.assertFalse(hasattr(args, "time_gap_minutes"))
         self.assertFalse(hasattr(args, "split_distance_m"))
         self.assertFalse(hasattr(args, "split_by_location"))
@@ -186,6 +269,9 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             parser.parse_args(["/tmp/2025_07_24", "--opencode-timeout-sec", "0"])
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["/tmp/2025_07_24", "--inference-workers", "0"])
 
     def test_group_clusters_by_country_keeps_first_seen_country_order(self) -> None:
         cluster_a = mod.LocationCluster(
@@ -444,6 +530,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                     "opencode_max_attempts": 5,
                     "opencode_initial_backoff_sec": 3.0,
                     "opencode_model": None,
+                    "inference_workers": 3,
                 },
                 "input_fingerprint": "stale-fingerprint",
                 "next_cluster_index": 1,
@@ -462,6 +549,129 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                     ],
                 ) as infer_mock:
                     result = mod.rename_folder_from_itinerary(day, apply=False, ratio=1.0)
+
+        self.assertEqual(result["status"], "planned-rename")
+        self.assertEqual(infer_mock.call_count, 2)
+
+    def test_parallel_inference_preserves_cluster_order(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_24"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg", "c.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 10.0000, 10.0000, datetime(2025, 7, 24, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 20.0000, 20.0000, datetime(2025, 7, 24, 10, 0, 0)),
+                mod.MediaPoint(str(day / "c.jpg"), 30.0000, 30.0000, datetime(2025, 7, 24, 11, 0, 0)),
+            ]
+
+            def fake_infer(lat: float, lon: float, **_kwargs: object) -> dict[str, str]:
+                if lat < 15:
+                    time.sleep(0.06)
+                    return {"landmark": "FirstSpot", "country": "Iceland"}
+                if lat < 25:
+                    time.sleep(0.01)
+                    return {"landmark": "SecondSpot", "country": "Iceland"}
+                time.sleep(0.03)
+                return {"landmark": "ThirdSpot", "country": "Iceland"}
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch("rename_folder_by_ai_itinerary.infer_landmark_info", side_effect=fake_infer):
+                    result = mod.rename_folder_from_itinerary(
+                        day,
+                        apply=False,
+                        ratio=1.0,
+                        cluster_distance_m=1.0,
+                        inference_workers=3,
+                    )
+
+        self.assertEqual(result["status"], "planned-rename")
+        self.assertEqual(result["landmarks"], ["FirstSpot", "SecondSpot", "ThirdSpot"])
+        report = cast(dict[str, object], result["inference_worker_report"])
+        self.assertEqual(report["workers_requested"], 3)
+        self.assertEqual(report["servers_started"], 3)
+        self.assertEqual(report["tasks_total"], 3)
+        self.assertEqual(report["tasks_succeeded"], 3)
+
+    def test_parallel_inference_failure_keeps_first_failed_index(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_24"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg", "c.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 10.0000, 10.0000, datetime(2025, 7, 24, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 20.0000, 20.0000, datetime(2025, 7, 24, 10, 0, 0)),
+                mod.MediaPoint(str(day / "c.jpg"), 30.0000, 30.0000, datetime(2025, 7, 24, 11, 0, 0)),
+            ]
+
+            def fake_infer(lat: float, lon: float, **_kwargs: object) -> dict[str, str]:
+                if lat < 15:
+                    time.sleep(0.05)
+                    return {"landmark": "FirstSpot", "country": "Iceland"}
+                if lat < 25:
+                    raise mod.InferenceExhaustedError(
+                        "timeout",
+                        attempt_count=2,
+                        attempt_failures=[
+                            {"attempt": 1, "failure_type": "timeout", "detail": "timeout", "wait_before_next_sec": 3.0},
+                            {"attempt": 2, "failure_type": "timeout", "detail": "timeout"},
+                        ],
+                    )
+                time.sleep(0.01)
+                return {"landmark": "ThirdSpot", "country": "Iceland"}
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch("rename_folder_by_ai_itinerary.infer_landmark_info", side_effect=fake_infer):
+                    result = mod.rename_folder_from_itinerary(
+                        day,
+                        apply=False,
+                        ratio=1.0,
+                        cluster_distance_m=1.0,
+                        inference_workers=3,
+                    )
+
+            state = mod.read_json_file(mod.default_state_file(day))
+
+        self.assertEqual(result["status"], "failed-inference")
+        self.assertEqual(result["next_cluster_index"], 1)
+        report = cast(dict[str, object], result["inference_worker_report"])
+        self.assertEqual(report["tasks_failed"], 1)
+        self.assertIsInstance(state, dict)
+        state_dict = cast(dict[str, object], state)
+        completed = cast(list[dict[str, object]], state_dict["completed_cluster_infos"])
+        self.assertEqual(len(completed), 1)
+
+    def test_parallel_server_pool_dedupes_same_inference_key(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            day = Path(tmpdir) / "2025_07_24"
+            day.mkdir()
+            for name in ["a.jpg", "b.jpg", "c.jpg"]:
+                (day / name).write_bytes(b"x")
+
+            points = [
+                mod.MediaPoint(str(day / "a.jpg"), 10.00001, 10.00001, datetime(2025, 7, 24, 9, 0, 0)),
+                mod.MediaPoint(str(day / "b.jpg"), 10.00003, 10.00003, datetime(2025, 7, 24, 10, 0, 0)),
+                mod.MediaPoint(str(day / "c.jpg"), 30.00000, 30.00000, datetime(2025, 7, 24, 11, 0, 0)),
+            ]
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=(points, [])):
+                with patch(
+                    "rename_folder_by_ai_itinerary.infer_landmark_info",
+                    side_effect=[
+                        {"landmark": "SameSpot", "country": "Iceland"},
+                        {"landmark": "FarSpot", "country": "Iceland"},
+                    ],
+                ) as infer_mock:
+                    result = mod.rename_folder_from_itinerary(
+                        day,
+                        apply=False,
+                        ratio=1.0,
+                        cluster_distance_m=1.0,
+                        inference_workers=3,
+                    )
 
         self.assertEqual(result["status"], "planned-rename")
         self.assertEqual(infer_mock.call_count, 2)
@@ -728,6 +938,64 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(cast(dict[str, object], tree_report)["failed_folder_count"], 1)
         self.assertIsInstance(tree_state, dict)
         self.assertEqual(cast(dict[str, object], tree_state)["total_folder_count"], 2)
+
+    def test_process_folder_tree_reuses_server_pool_across_folders(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            day_a = root / "2025" / "2025_07_22"
+            day_b = root / "2025" / "2025_07_23"
+            day_a.mkdir(parents=True)
+            day_b.mkdir(parents=True)
+
+            seen_pool_ids: list[int] = []
+
+            def fake_rename(
+                folder: Path,
+                apply: bool,
+                ratio: float,
+                cluster_distance_m: float,
+                max_landmarks: int,
+                opencode_timeout_sec: int,
+                opencode_retries: int,
+                opencode_backoff_sec: float,
+                opencode_model: str | None,
+                inference_workers: int,
+                server_pool: list[mod.OpencodeServerHandle] | None,
+                inference_scheduler: mod.SharedInferenceScheduler | None,
+                state_file: Path,
+                report_file: Path,
+                resume: bool,
+            ) -> dict[str, object]:
+                _ = (
+                    apply,
+                    ratio,
+                    cluster_distance_m,
+                    max_landmarks,
+                    opencode_timeout_sec,
+                    opencode_retries,
+                    opencode_backoff_sec,
+                    opencode_model,
+                    inference_workers,
+                    inference_scheduler,
+                    state_file,
+                    report_file,
+                    resume,
+                )
+                seen_pool_ids.append(id(server_pool))
+                return {"folder_path": str(folder), "status": "planned-rename", "target_name": f"{folder.name}_A"}
+
+            with patch(
+                "rename_folder_by_ai_itinerary.start_opencode_server",
+                side_effect=self._fake_start_opencode_server,
+            ) as start_mock:
+                with patch("rename_folder_by_ai_itinerary.stop_opencode_server", return_value=None) as stop_mock:
+                    with patch("rename_folder_by_ai_itinerary.rename_folder_from_itinerary", side_effect=fake_rename):
+                        summary = mod.process_folder_tree(root, apply=False, ratio=0.01, inference_workers=3)
+
+        self.assertEqual(summary["total_folder_count"], 2)
+        self.assertEqual(start_mock.call_count, 3)
+        self.assertEqual(stop_mock.call_count, 3)
+        self.assertEqual(len(set(seen_pool_ids)), 1)
 
     def test_process_folder_tree_continues_after_failed_extract(self) -> None:
         with TemporaryDirectory() as tmpdir:
