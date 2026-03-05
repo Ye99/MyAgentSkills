@@ -4,6 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+import queue
+import socket
+import threading
+import urllib.error
+import urllib.request
 import hashlib
 import json
 import math
@@ -34,6 +42,196 @@ class InferenceExhaustedError(RuntimeError):
         super().__init__(message)
         self.attempt_count = attempt_count
         self.attempt_failures = attempt_failures or []
+
+
+@dataclass
+class OpencodeServerHandle:
+    worker_id: int
+    port: int
+    url: str
+    process: subprocess.Popen[str] | None
+
+
+def _http_json_request(
+    *,
+    method: str,
+    url: str,
+    body: dict[str, Any] | None,
+    timeout_sec: int,
+) -> tuple[int, dict[str, Any]]:
+    data = None
+    headers: dict[str, str] = {}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["content-type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        status = int(response.status)
+        raw = response.read().decode("utf-8", "ignore")
+    if not raw:
+        return status, {}
+    parsed = json.loads(raw)
+    if isinstance(parsed, dict):
+        return status, parsed
+    return status, {}
+
+
+def _parse_http_model(opencode_model: str | None) -> dict[str, str] | None:
+    if not opencode_model:
+        return None
+    if "/" not in opencode_model:
+        return None
+    provider_id, model_id = opencode_model.split("/", 1)
+    provider_id = provider_id.strip()
+    model_id = model_id.strip()
+    if not provider_id or not model_id:
+        return None
+    return {"providerID": provider_id, "modelID": model_id}
+
+
+def _create_http_session(server_url: str, timeout_sec: int) -> str:
+    _status, payload = _http_json_request(
+        method="POST",
+        url=f"{server_url}/session",
+        body={},
+        timeout_sec=timeout_sec,
+    )
+    session_id = payload.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeError("session create returned no id")
+    return session_id
+
+
+def _run_opencode_http_with_retry(
+    *,
+    server_url: str,
+    prompt: str,
+    timeout_sec: int,
+    retries: int,
+    backoff_sec: float,
+    session_id: str | None,
+    opencode_model: str | None,
+    attempt_report: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    attempts = max(1, retries)
+    last_error = "opencode http failed"
+    attempt_failures: list[dict[str, Any]] = []
+    current_session_id = session_id
+    parsed_model = _parse_http_model(opencode_model)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if not current_session_id:
+                current_session_id = _create_http_session(server_url, timeout_sec=timeout_sec)
+
+            request_payload: dict[str, Any] = {
+                "variant": "medium",
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "landmark_name": {"type": "string"},
+                            "country_name": {"type": "string"},
+                        },
+                        "required": ["landmark_name", "country_name"],
+                        "additionalProperties": False,
+                    },
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ],
+            }
+            if parsed_model is not None:
+                request_payload["model"] = parsed_model
+
+            _status, response_payload = _http_json_request(
+                method="POST",
+                url=f"{server_url}/session/{current_session_id}/message",
+                body=request_payload,
+                timeout_sec=timeout_sec,
+            )
+            info = response_payload.get("info")
+            if isinstance(info, dict):
+                structured = info.get("structured")
+                if isinstance(structured, dict):
+                    if attempt_report is not None:
+                        attempt_report["attempt_count"] = attempt
+                        attempt_report["attempt_failures"] = list(attempt_failures)
+                    return structured, current_session_id
+
+            parts = response_payload.get("parts")
+            if isinstance(parts, list):
+                for part in parts:
+                    if not isinstance(part, dict) or part.get("type") != "text":
+                        continue
+                    text = part.get("text")
+                    if not isinstance(text, str):
+                        continue
+                    payload = parse_json_payload(text)
+                    if payload is not None:
+                        if attempt_report is not None:
+                            attempt_report["attempt_count"] = attempt
+                            attempt_report["attempt_failures"] = list(attempt_failures)
+                        return payload, current_session_id
+
+            last_error = "opencode http returned non-JSON payload"
+            attempt_failures.append(
+                {
+                    "attempt": attempt,
+                    "failure_type": "invalid-json",
+                    "detail": last_error,
+                }
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "ignore").strip()
+            last_error = f"opencode http status={exc.code}: {detail}" if detail else f"opencode http status={exc.code}"
+            attempt_failures.append(
+                {
+                    "attempt": attempt,
+                    "failure_type": "http-error",
+                    "detail": last_error,
+                }
+            )
+            if exc.code in {404, 410}:
+                current_session_id = None
+        except TimeoutError:
+            last_error = f"opencode http timeout after {timeout_sec}s"
+            attempt_failures.append(
+                {
+                    "attempt": attempt,
+                    "failure_type": "timeout",
+                    "detail": last_error,
+                }
+            )
+        except urllib.error.URLError as exc:
+            last_error = f"opencode http error: {exc}"
+            attempt_failures.append(
+                {
+                    "attempt": attempt,
+                    "failure_type": "network",
+                    "detail": last_error,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"opencode http error: {exc}"
+            attempt_failures.append(
+                {
+                    "attempt": attempt,
+                    "failure_type": "exception",
+                    "detail": last_error,
+                }
+            )
+
+        if attempt < attempts:
+            wait_sec = backoff_sec * (2 ** (attempt - 1))
+            attempt_failures[-1]["wait_before_next_sec"] = wait_sec
+            time.sleep(wait_sec)
+
+    raise InferenceExhaustedError(last_error, attempt_count=attempts, attempt_failures=attempt_failures)
 
 
 @dataclass(frozen=True)
@@ -310,6 +508,7 @@ def _run_opencode_with_retry(
     timeout_sec: int,
     retries: int,
     backoff_sec: float,
+    attempt_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries)
     last_error = "opencode failed"
@@ -326,6 +525,9 @@ def _run_opencode_with_retry(
             if run_result.returncode == 0:
                 payload = parse_json_payload(run_result.stdout)
                 if payload is not None:
+                    if attempt_report is not None:
+                        attempt_report["attempt_count"] = attempt
+                        attempt_report["attempt_failures"] = list(attempt_failures)
                     return payload
                 last_error = "opencode returned non-JSON payload"
                 attempt_failures.append(
@@ -403,9 +605,16 @@ def infer_landmark_info(
     opencode_model: str | None = None,
     cache: dict[tuple[float, float], dict[str, str]] | None = None,
     strict: bool = False,
+    opencode_attach_url: str | None = None,
+    opencode_session_id: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     rounded = (round(lat, 4), round(lon, 4))
     if cache is not None and rounded in cache:
+        if diagnostics is not None:
+            diagnostics["source"] = "cache"
+            diagnostics["opencode_attempt_count"] = 0
+            diagnostics["opencode_retry_count"] = 0
         return cache[rounded]
 
     result: dict[str, str] = {"landmark": UNKNOWN_LANDMARK, "country": "UnknownCountry"}
@@ -423,23 +632,45 @@ def infer_landmark_info(
             f"Cluster start: {start_time.isoformat() if start_time else 'unknown'}. "
             f"Cluster end: {end_time.isoformat() if end_time else 'unknown'}."
         )
-        command = ["opencode"]
-        if opencode_model:
-            command.extend(["-m", opencode_model])
-        command.extend(["--variant", "medium", "run", prompt])
+        attempt_report: dict[str, Any] = {}
         try:
-            payload = _run_opencode_with_retry(
-                command=command,
-                timeout_sec=opencode_timeout_sec,
-                retries=opencode_retries,
-                backoff_sec=opencode_backoff_sec,
-            )
+            if opencode_attach_url:
+                payload, returned_session_id = _run_opencode_http_with_retry(
+                    server_url=opencode_attach_url,
+                    prompt=prompt,
+                    timeout_sec=opencode_timeout_sec,
+                    retries=opencode_retries,
+                    backoff_sec=opencode_backoff_sec,
+                    session_id=opencode_session_id,
+                    opencode_model=opencode_model,
+                    attempt_report=attempt_report,
+                )
+                if diagnostics is not None:
+                    diagnostics["opencode_session_id"] = returned_session_id
+            else:
+                command = ["opencode", "run"]
+                if opencode_model:
+                    command.extend(["-m", opencode_model])
+                command.extend(["--variant", "medium", prompt])
+                payload = _run_opencode_with_retry(
+                    command=command,
+                    timeout_sec=opencode_timeout_sec,
+                    retries=opencode_retries,
+                    backoff_sec=opencode_backoff_sec,
+                    attempt_report=attempt_report,
+                )
         except InferenceExhaustedError:
             if strict:
                 raise
             payload = None
 
         if payload is not None:
+            if diagnostics is not None:
+                attempt_count = int(attempt_report.get("attempt_count", 1))
+                diagnostics["source"] = "opencode"
+                diagnostics["opencode_attempt_count"] = attempt_count
+                diagnostics["opencode_retry_count"] = max(0, attempt_count - 1)
+                diagnostics["opencode_attempt_failures"] = list(attempt_report.get("attempt_failures", []))
             raw_landmark = payload.get("landmark_name")
             raw_country = payload.get("country_name")
             if isinstance(raw_landmark, str) and raw_landmark.strip():
@@ -584,6 +815,592 @@ def should_split_country_groups(country_groups: list[dict[str, Any]]) -> bool:
         if str(group.get("country") or "UnknownCountry") != "UnknownCountry"
     }
     return len(known_countries) >= 2
+
+
+def _cluster_inference_key(cluster: LocationCluster) -> tuple[float, float]:
+    c_lat, c_lon = cluster.centroid
+    return round(c_lat, 4), round(c_lon, 4)
+
+
+def _find_free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _append_worker_log(logs: list[dict[str, Any]], entry: dict[str, Any], max_entries: int = 400) -> None:
+    if len(logs) >= max_entries:
+        return
+    logs.append(entry)
+
+
+def start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> OpencodeServerHandle:
+    port = _find_free_local_port()
+    process = subprocess.Popen(
+        ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    url = f"http://127.0.0.1:{port}"
+    deadline = time.time() + startup_timeout_sec
+    health_url = f"{url}/global/health"
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"worker-{worker_id} opencode serve exited early code={process.returncode}")
+        try:
+            with urllib.request.urlopen(health_url, timeout=1.0) as response:
+                if response.status == 200:
+                    return OpencodeServerHandle(worker_id=worker_id, port=port, url=url, process=process)
+        except Exception:
+            time.sleep(0.2)
+
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    raise RuntimeError(f"worker-{worker_id} timed out waiting for opencode serve health")
+
+
+def stop_opencode_server(handle: OpencodeServerHandle) -> None:
+    if handle.process is None:
+        return
+    if handle.process.poll() is not None:
+        return
+    handle.process.terminate()
+    try:
+        handle.process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        handle.process.kill()
+
+
+def start_opencode_server_pool(worker_count: int) -> list[OpencodeServerHandle]:
+    servers: list[OpencodeServerHandle] = []
+    for worker_id in range(max(1, worker_count)):
+        try:
+            servers.append(start_opencode_server(worker_id=worker_id))
+        except Exception:
+            for started in servers:
+                stop_opencode_server(started)
+            raise
+    return servers
+
+
+def stop_opencode_server_pool(servers: list[OpencodeServerHandle]) -> None:
+    for handle in servers:
+        stop_opencode_server(handle)
+
+
+def _has_rate_limit_hint(detail: str) -> bool:
+    lowered = detail.casefold()
+    return (
+        "rate limit" in lowered
+        or "too many requests" in lowered
+        or "throttle" in lowered
+        or "quota" in lowered
+        or "429" in lowered
+    )
+
+
+@dataclass
+class SchedulerTaskResult:
+    info: dict[str, str]
+    diagnostics: dict[str, Any]
+
+
+class SharedInferenceScheduler:
+    def __init__(
+        self,
+        servers: list[OpencodeServerHandle],
+        *,
+        opencode_timeout_sec: int,
+        opencode_retries: int,
+        opencode_backoff_sec: float,
+        opencode_model: str | None,
+    ) -> None:
+        self._servers = list(servers)
+        self._timeout_sec = opencode_timeout_sec
+        self._retries = opencode_retries
+        self._backoff_sec = opencode_backoff_sec
+        self._model = opencode_model
+        self._queue: queue.Queue[tuple[tuple[float, float, str], LocationCluster] | None] = queue.Queue()
+        self._futures: dict[tuple[float, float, str], Future[SchedulerTaskResult]] = {}
+        self._lock = threading.Lock()
+        self._closed = False
+        self._metrics: dict[str, int] = {
+            "submit_total": 0,
+            "dedupe_hit_total": 0,
+            "queued_total": 0,
+            "executed_total": 0,
+        }
+        self._threads: list[threading.Thread] = []
+        for handle in self._servers:
+            thread = threading.Thread(target=self._worker_loop, args=(handle,), daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def submit(self, key: tuple[float, float], cluster: LocationCluster) -> Future[SchedulerTaskResult]:
+        task_key = (key[0], key[1], self._model or "")
+        with self._lock:
+            self._metrics["submit_total"] += 1
+            if self._closed:
+                future: Future[SchedulerTaskResult] = Future()
+                future.set_exception(InferenceExhaustedError("scheduler closed", attempt_count=0))
+                return future
+            existing = self._futures.get(task_key)
+            if existing is not None:
+                self._metrics["dedupe_hit_total"] += 1
+                return existing
+            future = Future()
+            self._futures[task_key] = future
+            self._metrics["queued_total"] += 1
+            self._queue.put((task_key, cluster))
+            return future
+
+    def _worker_loop(self, handle: OpencodeServerHandle) -> None:
+        session_id: str | None = None
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                break
+            task_key, cluster = item
+            with self._lock:
+                future = self._futures.get(task_key)
+            if future is None or future.done():
+                self._queue.task_done()
+                continue
+            c_lat, c_lon = cluster.centroid
+            diagnostics: dict[str, Any] = {}
+            try:
+                info = infer_landmark_info(
+                    c_lat,
+                    c_lon,
+                    start_time=cluster.start_time,
+                    end_time=cluster.end_time,
+                    sample_count=len(cluster.points),
+                    opencode_timeout_sec=self._timeout_sec,
+                    opencode_retries=self._retries,
+                    opencode_backoff_sec=self._backoff_sec,
+                    opencode_model=self._model,
+                    cache=None,
+                    strict=True,
+                    opencode_attach_url=handle.url,
+                    opencode_session_id=session_id,
+                    diagnostics=diagnostics,
+                )
+                session_value = diagnostics.get("opencode_session_id")
+                if isinstance(session_value, str) and session_value:
+                    session_id = session_value
+                future.set_result(SchedulerTaskResult(info=info, diagnostics=diagnostics))
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, InferenceExhaustedError):
+                    future.set_exception(exc)
+                else:
+                    future.set_exception(
+                        InferenceExhaustedError(
+                            f"opencode error: {exc}",
+                            attempt_count=0,
+                            attempt_failures=[
+                                {
+                                    "attempt": 0,
+                                    "failure_type": "exception",
+                                    "detail": f"opencode error: {exc}",
+                                }
+                            ],
+                        )
+                    )
+            finally:
+                with self._lock:
+                    self._metrics["executed_total"] += 1
+                self._queue.task_done()
+
+    def snapshot_metrics(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._metrics)
+
+    def shutdown(self, cancel_pending: bool = False) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if cancel_pending:
+                for future in self._futures.values():
+                    if not future.done():
+                        future.set_exception(
+                            InferenceExhaustedError("processing cancelled by user", attempt_count=0)
+                        )
+        for _ in self._threads:
+            self._queue.put(None)
+        for thread in self._threads:
+            thread.join(timeout=5)
+
+
+def infer_pending_cluster_infos(
+    pending_clusters: list[tuple[int, LocationCluster]],
+    *,
+    opencode_timeout_sec: int,
+    opencode_retries: int,
+    opencode_backoff_sec: float,
+    opencode_model: str | None,
+    inference_workers: int,
+    server_pool: list[OpencodeServerHandle] | None = None,
+    inference_scheduler: SharedInferenceScheduler | None = None,
+) -> tuple[
+    list[tuple[int, LocationCluster, dict[str, str]]],
+    tuple[int, LocationCluster, InferenceExhaustedError] | None,
+    dict[str, Any],
+]:
+    completed: list[tuple[int, LocationCluster, dict[str, str]]] = []
+    worker_report: dict[str, Any] = {
+        "workers_requested": inference_workers,
+        "workers_started": 0,
+        "servers_started": 0,
+        "servers_stopped": 0,
+        "tasks_total": len(pending_clusters),
+        "tasks_succeeded": 0,
+        "tasks_failed": 0,
+        "retry_attempts_total": 0,
+        "rate_limit_hint_count": 0,
+        "cancelled": False,
+        "worker_logs": [],
+    }
+
+    if not pending_clusters:
+        return completed, None, worker_report
+
+    if inference_scheduler is not None:
+        ordered_pending = sorted(pending_clusters, key=lambda item: item[0])
+        key_members: dict[tuple[float, float], list[tuple[int, LocationCluster]]] = {}
+        key_representative: dict[tuple[float, float], LocationCluster] = {}
+        for idx, cluster in ordered_pending:
+            key = _cluster_inference_key(cluster)
+            key_members.setdefault(key, []).append((idx, cluster))
+            if key not in key_representative:
+                key_representative[key] = cluster
+
+        worker_report["unique_inference_requests"] = len(key_representative)
+        worker_report["duplicate_inference_skipped"] = len(ordered_pending) - len(key_representative)
+        worker_report["workers_started"] = max(1, inference_workers)
+        worker_report["servers_started"] = max(1, inference_workers)
+
+        future_by_key: dict[tuple[float, float], Future[SchedulerTaskResult]] = {}
+        for key, cluster in key_representative.items():
+            future_by_key[key] = inference_scheduler.submit(key, cluster)
+
+        seen_keys: set[tuple[float, float]] = set()
+        for idx, cluster in ordered_pending:
+            key = _cluster_inference_key(cluster)
+            future = future_by_key[key]
+            try:
+                task_result = future.result()
+            except InferenceExhaustedError as exc:
+                worker_report["tasks_succeeded"] = len(completed)
+                worker_report["tasks_failed"] = 1
+                worker_report["scheduler_metrics"] = inference_scheduler.snapshot_metrics()
+                return completed, (idx, cluster, exc), worker_report
+
+            info = task_result.info
+            if key not in seen_keys:
+                seen_keys.add(key)
+                diagnostics = task_result.diagnostics
+                worker_report["retry_attempts_total"] = int(worker_report["retry_attempts_total"]) + int(
+                    diagnostics.get("opencode_retry_count", 0)
+                )
+                attempt_failures = diagnostics.get("opencode_attempt_failures", [])
+                if isinstance(attempt_failures, list):
+                    for failure in attempt_failures:
+                        if not isinstance(failure, dict):
+                            continue
+                        detail = str(failure.get("detail", ""))
+                        if _has_rate_limit_hint(detail):
+                            worker_report["rate_limit_hint_count"] = int(worker_report["rate_limit_hint_count"]) + 1
+            completed.append((idx, cluster, info))
+
+        worker_report["tasks_succeeded"] = len(completed)
+        worker_report["tasks_failed"] = 0
+        worker_report["servers_stopped"] = 0
+        worker_report["scheduler_metrics"] = inference_scheduler.snapshot_metrics()
+        return completed, None, worker_report
+
+    if inference_workers <= 1:
+        info_cache: dict[tuple[float, float], dict[str, str]] = {}
+        for idx, cluster in pending_clusters:
+            c_lat, c_lon = cluster.centroid
+            diagnostics: dict[str, Any] = {}
+            try:
+                info = infer_landmark_info(
+                    c_lat,
+                    c_lon,
+                    start_time=cluster.start_time,
+                    end_time=cluster.end_time,
+                    sample_count=len(cluster.points),
+                    opencode_timeout_sec=opencode_timeout_sec,
+                    opencode_retries=opencode_retries,
+                    opencode_backoff_sec=opencode_backoff_sec,
+                    opencode_model=opencode_model,
+                    cache=info_cache,
+                    strict=True,
+                    diagnostics=diagnostics,
+                )
+            except InferenceExhaustedError as exc:
+                worker_report["tasks_failed"] = int(worker_report["tasks_failed"]) + 1
+                worker_report["retry_attempts_total"] = int(worker_report["retry_attempts_total"]) + max(
+                    0,
+                    exc.attempt_count - 1,
+                )
+                return completed, (idx, cluster, exc), worker_report
+            worker_report["tasks_succeeded"] = int(worker_report["tasks_succeeded"]) + 1
+            worker_report["retry_attempts_total"] = int(worker_report["retry_attempts_total"]) + int(
+                diagnostics.get("opencode_retry_count", 0)
+            )
+            completed.append((idx, cluster, info))
+        return completed, None, worker_report
+
+    ordered_pending = sorted(pending_clusters, key=lambda item: item[0])
+    key_members: dict[tuple[float, float], list[tuple[int, LocationCluster]]] = {}
+    key_representative: dict[tuple[float, float], LocationCluster] = {}
+    unique_keys_in_order: list[tuple[float, float]] = []
+    for idx, cluster in ordered_pending:
+        key = _cluster_inference_key(cluster)
+        if key not in key_members:
+            key_members[key] = []
+            key_representative[key] = cluster
+            unique_keys_in_order.append(key)
+        key_members[key].append((idx, cluster))
+
+    unique_tasks: list[tuple[tuple[float, float], LocationCluster]] = [
+        (key, key_representative[key]) for key in unique_keys_in_order
+    ]
+
+    worker_report["unique_inference_requests"] = len(unique_tasks)
+    worker_report["duplicate_inference_skipped"] = len(ordered_pending) - len(unique_tasks)
+
+    task_queue: queue.Queue[tuple[tuple[float, float], LocationCluster]] = queue.Queue()
+    for item in unique_tasks:
+        task_queue.put(item)
+
+    worker_count = max(1, inference_workers)
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    results_by_key: dict[tuple[float, float], dict[str, str]] = {}
+    failures_by_key: dict[tuple[float, float], InferenceExhaustedError] = {}
+    owns_servers = server_pool is None
+    if server_pool is None:
+        try:
+            servers = start_opencode_server_pool(worker_count)
+        except Exception as exc:  # noqa: BLE001
+            error = InferenceExhaustedError(
+                f"server pool start failed: {exc}",
+                attempt_count=0,
+                attempt_failures=[
+                    {
+                        "attempt": 0,
+                        "failure_type": "server-start",
+                        "detail": str(exc),
+                    }
+                ],
+            )
+            first_idx, first_cluster = ordered_pending[0]
+            worker_report["tasks_failed"] = 1
+            _append_worker_log(
+                worker_report["worker_logs"],
+                {
+                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "worker_id": -1,
+                    "event": "server_start_failed",
+                    "detail": str(exc),
+                },
+            )
+            return completed, (first_idx, first_cluster, error), worker_report
+    else:
+        servers = list(server_pool)
+
+    if not servers:
+        error = InferenceExhaustedError("no opencode servers available", attempt_count=0)
+        first_idx, first_cluster = ordered_pending[0]
+        worker_report["tasks_failed"] = 1
+        return completed, (first_idx, first_cluster, error), worker_report
+
+    if len(servers) > worker_count:
+        servers = servers[:worker_count]
+
+    worker_report["workers_started"] = len(servers)
+    worker_report["servers_started"] = len(servers)
+    for handle in servers:
+        _append_worker_log(
+            worker_report["worker_logs"],
+            {
+                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "worker_id": handle.worker_id,
+                "event": "server_attached",
+                "attach_url": handle.url,
+                "reuse_pool": not owns_servers,
+            },
+        )
+
+    def worker_loop(handle: OpencodeServerHandle) -> None:
+        worker_id = handle.worker_id
+        while not stop_event.is_set():
+            try:
+                key, cluster = task_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            task_members = key_members[key]
+            first_idx = task_members[0][0]
+
+            c_lat, c_lon = cluster.centroid
+            diagnostics: dict[str, Any] = {}
+            task_started_at = time.perf_counter()
+            _append_worker_log(
+                worker_report["worker_logs"],
+                {
+                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "worker_id": worker_id,
+                    "event": "task_start",
+                    "cluster_index": first_idx,
+                    "duplicate_cluster_count": len(task_members),
+                },
+            )
+            try:
+                info = infer_landmark_info(
+                    c_lat,
+                    c_lon,
+                    start_time=cluster.start_time,
+                    end_time=cluster.end_time,
+                    sample_count=len(cluster.points),
+                    opencode_timeout_sec=opencode_timeout_sec,
+                    opencode_retries=opencode_retries,
+                    opencode_backoff_sec=opencode_backoff_sec,
+                    opencode_model=opencode_model,
+                    cache=None,
+                    strict=True,
+                    opencode_attach_url=handle.url,
+                    diagnostics=diagnostics,
+                )
+                with lock:
+                    results_by_key[key] = info
+                    worker_report["retry_attempts_total"] = int(worker_report["retry_attempts_total"]) + int(
+                        diagnostics.get("opencode_retry_count", 0)
+                    )
+                    attempt_failures = diagnostics.get("opencode_attempt_failures", [])
+                    if isinstance(attempt_failures, list):
+                        for failure in attempt_failures:
+                            if not isinstance(failure, dict):
+                                continue
+                            detail = str(failure.get("detail", ""))
+                            if _has_rate_limit_hint(detail):
+                                worker_report["rate_limit_hint_count"] = int(worker_report["rate_limit_hint_count"]) + 1
+                _append_worker_log(
+                    worker_report["worker_logs"],
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "worker_id": worker_id,
+                        "event": "task_success",
+                        "cluster_index": first_idx,
+                        "retry_count": int(diagnostics.get("opencode_retry_count", 0)),
+                        "duration_sec": round(time.perf_counter() - task_started_at, 3),
+                    },
+                )
+            except InferenceExhaustedError as exc:
+                with lock:
+                    failures_by_key[key] = exc
+                    worker_report["retry_attempts_total"] = int(worker_report["retry_attempts_total"]) + max(
+                        0,
+                        exc.attempt_count - 1,
+                    )
+                _append_worker_log(
+                    worker_report["worker_logs"],
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "worker_id": worker_id,
+                        "event": "task_failed",
+                        "cluster_index": first_idx,
+                        "detail": str(exc),
+                        "duration_sec": round(time.perf_counter() - task_started_at, 3),
+                    },
+                )
+                stop_event.set()
+            finally:
+                task_queue.task_done()
+
+    threads: list[threading.Thread] = []
+    cancelled_error: InferenceExhaustedError | None = None
+    try:
+        for handle in servers:
+            thread = threading.Thread(target=worker_loop, args=(handle,), daemon=True)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        worker_report["cancelled"] = True
+        stop_event.set()
+        cancelled_error = InferenceExhaustedError(
+            "processing cancelled by user",
+            attempt_count=0,
+            attempt_failures=[
+                {
+                    "attempt": 0,
+                    "failure_type": "cancelled",
+                    "detail": "processing cancelled by user",
+                }
+            ],
+        )
+    finally:
+        if owns_servers:
+            for handle in servers:
+                stop_opencode_server(handle)
+                worker_report["servers_stopped"] = int(worker_report["servers_stopped"]) + 1
+                _append_worker_log(
+                    worker_report["worker_logs"],
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "worker_id": handle.worker_id,
+                        "event": "server_stopped",
+                    },
+                )
+        else:
+            worker_report["servers_stopped"] = 0
+
+    if cancelled_error is not None:
+        first_idx, first_cluster = ordered_pending[0]
+        worker_report["tasks_failed"] = int(worker_report["tasks_failed"]) + 1
+        return completed, (first_idx, first_cluster, cancelled_error), worker_report
+
+    if failures_by_key:
+        failed_key = min(
+            failures_by_key,
+            key=lambda key: key_members[key][0][0],
+        )
+        failed_idx = key_members[failed_key][0][0]
+        failure_exc = failures_by_key[failed_key]
+        for idx, cluster in ordered_pending:
+            if idx >= failed_idx:
+                break
+            key = _cluster_inference_key(cluster)
+            info = results_by_key.get(key)
+            if info is None:
+                break
+            completed.append((idx, cluster, info))
+        failed_cluster = key_members[failed_key][0][1]
+        worker_report["tasks_succeeded"] = len(completed)
+        worker_report["tasks_failed"] = 1
+        return completed, (failed_idx, failed_cluster, failure_exc), worker_report
+
+    for idx, cluster in ordered_pending:
+        key = _cluster_inference_key(cluster)
+        info = results_by_key.get(key)
+        if info is None:
+            continue
+        completed.append((idx, cluster, info))
+
+    worker_report["tasks_succeeded"] = len(completed)
+    worker_report["tasks_failed"] = 0
+
+    return completed, None, worker_report
 
 
 def select_top_landmarks_by_count(
@@ -813,12 +1630,39 @@ def process_folder_tree(
     opencode_retries: int = 5,
     opencode_backoff_sec: float = 3.0,
     opencode_model: str | None = None,
+    inference_workers: int = 3,
     resume: bool = True,
 ) -> dict[str, Any]:
     day_folders = discover_day_folders(root)
-    folder_results: list[dict[str, Any]] = []
+    folder_results: list[dict[str, Any] | None] = [None] * len(day_folders)
+    shared_server_pool: list[OpencodeServerHandle] | None = None
+    inference_scheduler: SharedInferenceScheduler | None = None
 
-    for folder in day_folders:
+    if inference_workers > 1:
+        try:
+            shared_server_pool = start_opencode_server_pool(inference_workers)
+            inference_scheduler = SharedInferenceScheduler(
+                shared_server_pool,
+                opencode_timeout_sec=opencode_timeout_sec,
+                opencode_retries=opencode_retries,
+                opencode_backoff_sec=opencode_backoff_sec,
+                opencode_model=opencode_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            summary: dict[str, Any] = {
+                "root_path": str(root),
+                "status": "failed-server-start",
+                "total_folder_count": len(day_folders),
+                "failed_folder_count": len(day_folders),
+                "error": {"message": str(exc)},
+                "tree_state_file": str(default_tree_state_file(root)),
+                "tree_report_file": str(default_tree_report_file(root)),
+            }
+            write_json_file(default_tree_state_file(root), summary)
+            write_json_file(default_tree_report_file(root), summary)
+            return summary
+
+    def run_folder(index: int, folder: Path) -> tuple[int, dict[str, Any]]:
         try:
             result = rename_folder_from_itinerary(
                 folder=folder,
@@ -830,6 +1674,9 @@ def process_folder_tree(
                 opencode_retries=opencode_retries,
                 opencode_backoff_sec=opencode_backoff_sec,
                 opencode_model=opencode_model,
+                inference_workers=inference_workers,
+                server_pool=shared_server_pool,
+                inference_scheduler=inference_scheduler,
                 state_file=default_state_file(folder),
                 report_file=default_report_file(folder),
                 resume=resume,
@@ -861,10 +1708,36 @@ def process_folder_tree(
                 "error": {"message": str(exc)},
                 "used_reverse_geocoding": False,
             }
-        if isinstance(result, dict):
-            folder_results.append(result)
+        return index, result
 
-    integrity_check = verify_tree_integrity(folder_results, apply=apply)
+    cancelled = False
+    try:
+        if inference_scheduler is not None and len(day_folders) > 1:
+            max_folder_workers = min(len(day_folders), max(4, inference_workers * 3))
+            with ThreadPoolExecutor(max_workers=max_folder_workers) as executor:
+                future_map = {
+                    executor.submit(run_folder, idx, folder): idx
+                    for idx, folder in enumerate(day_folders)
+                }
+                for future in as_completed(future_map):
+                    idx, result = future.result()
+                    folder_results[idx] = result
+        else:
+            for idx, folder in enumerate(day_folders):
+                _idx, result = run_folder(idx, folder)
+                folder_results[_idx] = result
+    except KeyboardInterrupt:
+        cancelled = True
+        raise
+    finally:
+        if inference_scheduler is not None:
+            inference_scheduler.shutdown(cancel_pending=cancelled)
+        if shared_server_pool is not None:
+            stop_opencode_server_pool(shared_server_pool)
+
+    materialized_results: list[dict[str, Any]] = [result for result in folder_results if isinstance(result, dict)]
+
+    integrity_check = verify_tree_integrity(materialized_results, apply=apply)
 
     summary_status = "completed"
     if not integrity_check["passed"]:
@@ -873,7 +1746,7 @@ def process_folder_tree(
         summary_status = "completed-with-failures"
 
     failed_folders: list[dict[str, Any]] = []
-    for result in folder_results:
+    for result in materialized_results:
         status = str(result.get("status") or "")
         if not status.startswith("failed"):
             continue
@@ -911,10 +1784,11 @@ def process_folder_tree(
             "opencode_timeout_sec": opencode_timeout_sec,
             "opencode_max_attempts": opencode_retries,
             "opencode_initial_backoff_sec": opencode_backoff_sec,
+            "inference_workers": inference_workers,
         },
         "total_folder_count": integrity_check["total_folder_count"],
         "integrity_check": integrity_check,
-        "folder_results": folder_results,
+        "folder_results": materialized_results,
     }
     write_json_file(default_tree_state_file(root), tree_state_payload)
 
@@ -949,6 +1823,9 @@ def rename_folder_from_itinerary(
     opencode_retries: int = 5,
     opencode_backoff_sec: float = 3.0,
     opencode_model: str | None = None,
+    inference_workers: int = 3,
+    server_pool: list[OpencodeServerHandle] | None = None,
+    inference_scheduler: SharedInferenceScheduler | None = None,
     state_file: Path | None = None,
     report_file: Path | None = None,
     resume: bool = True,
@@ -967,6 +1844,7 @@ def rename_folder_from_itinerary(
         "opencode_max_attempts": opencode_retries,
         "opencode_initial_backoff_sec": opencode_backoff_sec,
         "opencode_model": opencode_model,
+        "inference_workers": inference_workers,
     }
 
     try:
@@ -1037,88 +1915,27 @@ def rename_folder_from_itinerary(
                     if isinstance(item, dict):
                         persistent_failure_log.append(item)
 
-    info_cache: dict[tuple[float, float], dict[str, str]] = {}
     cluster_infos: list[tuple[LocationCluster, dict[str, str]]] = []
+    pending_clusters: list[tuple[int, LocationCluster]] = []
     for idx, cluster in enumerate(sampled_clusters):
         if idx < len(completed_infos):
             cluster_infos.append((cluster, completed_infos[idx]))
             continue
 
-        c_lat, c_lon = cluster.centroid
-        try:
-            info = infer_landmark_info(
-                c_lat,
-                c_lon,
-                start_time=cluster.start_time,
-                end_time=cluster.end_time,
-                sample_count=len(cluster.points),
-                opencode_timeout_sec=opencode_timeout_sec,
-                opencode_retries=opencode_retries,
-                opencode_backoff_sec=opencode_backoff_sec,
-                opencode_model=opencode_model,
-                cache=info_cache,
-                strict=True,
-            )
-        except InferenceExhaustedError as exc:
-            failure_entry: dict[str, Any] = {
-                "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "cluster_index": idx,
-                "cluster_centroid": {"lat": c_lat, "lon": c_lon},
-                "cluster_start": cluster.start_time.isoformat(),
-                "cluster_end": cluster.end_time.isoformat(),
-                "cluster_sample_count": len(cluster.points),
-                "error_message": str(exc),
-                "attempt_count": exc.attempt_count,
-                "attempt_failures": exc.attempt_failures,
-            }
-            persistent_failure_log.append(failure_entry)
+        pending_clusters.append((idx, cluster))
 
-            state_payload: dict[str, Any] = {
-                "folder_path": str(folder),
-                "status": "failed-inference",
-                "config": current_config,
-                "input_fingerprint": input_fingerprint,
-                "next_cluster_index": idx,
-                "completed_cluster_infos": [info for _cluster, info in cluster_infos],
-                "persistent_failure_count": len(persistent_failure_log),
-                "persistent_failure_log": persistent_failure_log,
-                "error": {
-                    "message": str(exc),
-                    "attempt_count": exc.attempt_count,
-                },
-            }
-            write_json_file(state_file, state_payload)
+    completed_pending_infos, pending_failure, inference_worker_report = infer_pending_cluster_infos(
+        pending_clusters,
+        opencode_timeout_sec=opencode_timeout_sec,
+        opencode_retries=opencode_retries,
+        opencode_backoff_sec=opencode_backoff_sec,
+        opencode_model=opencode_model,
+        inference_workers=inference_workers,
+        server_pool=server_pool,
+        inference_scheduler=inference_scheduler,
+    )
 
-            persistent_failure_summary: dict[str, Any] = {
-                "persistent_failure_count": len(persistent_failure_log),
-                "last_failed_cluster_index": idx,
-                "last_error_message": str(exc),
-                "last_error_attempt_count": exc.attempt_count,
-            }
-            report_payload: dict[str, Any] = {
-                "status": "failed-inference",
-                "folder_path": str(folder),
-                "state_file": str(state_file),
-                "next_cluster_index": idx,
-                "error": state_payload["error"],
-                "persistent_failure_summary": persistent_failure_summary,
-                "used_reverse_geocoding": False,
-            }
-            write_json_file(report_file, report_payload)
-            return {
-                "folder_path": str(folder),
-                "status": "failed-inference",
-                "state_file": str(state_file),
-                "report_file": str(report_file),
-                "next_cluster_index": idx,
-                "persistent_failure_count": len(persistent_failure_log),
-                "media_with_gps_count": len(points),
-                "media_with_gps_sampled": len(sampled_points),
-                "sample_ratio_requested": ratio,
-                "media_without_gps_count": len(without_gps),
-                "used_reverse_geocoding": False,
-            }
-
+    for idx, cluster, info in completed_pending_infos:
         cluster_infos.append((cluster, info))
         state_payload = {
             "folder_path": str(folder),
@@ -1131,6 +1948,71 @@ def rename_folder_from_itinerary(
             "persistent_failure_log": persistent_failure_log,
         }
         write_json_file(state_file, state_payload)
+
+    if pending_failure is not None:
+        idx, cluster, exc = pending_failure
+        c_lat, c_lon = cluster.centroid
+        failure_entry: dict[str, Any] = {
+            "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "cluster_index": idx,
+            "cluster_centroid": {"lat": c_lat, "lon": c_lon},
+            "cluster_start": cluster.start_time.isoformat(),
+            "cluster_end": cluster.end_time.isoformat(),
+            "cluster_sample_count": len(cluster.points),
+            "error_message": str(exc),
+            "attempt_count": exc.attempt_count,
+            "attempt_failures": exc.attempt_failures,
+        }
+        persistent_failure_log.append(failure_entry)
+
+        state_payload = {
+            "folder_path": str(folder),
+            "status": "failed-inference",
+            "config": current_config,
+            "input_fingerprint": input_fingerprint,
+            "next_cluster_index": idx,
+            "completed_cluster_infos": [info for _cluster, info in cluster_infos],
+            "persistent_failure_count": len(persistent_failure_log),
+            "persistent_failure_log": persistent_failure_log,
+            "error": {
+                "message": str(exc),
+                "attempt_count": exc.attempt_count,
+            },
+            "inference_worker_report": inference_worker_report,
+        }
+        write_json_file(state_file, state_payload)
+
+        persistent_failure_summary: dict[str, Any] = {
+            "persistent_failure_count": len(persistent_failure_log),
+            "last_failed_cluster_index": idx,
+            "last_error_message": str(exc),
+            "last_error_attempt_count": exc.attempt_count,
+        }
+        report_payload: dict[str, Any] = {
+            "status": "failed-inference",
+            "folder_path": str(folder),
+            "state_file": str(state_file),
+            "next_cluster_index": idx,
+            "error": state_payload["error"],
+            "persistent_failure_summary": persistent_failure_summary,
+            "inference_worker_report": inference_worker_report,
+            "used_reverse_geocoding": False,
+        }
+        write_json_file(report_file, report_payload)
+        return {
+            "folder_path": str(folder),
+            "status": "failed-inference",
+            "state_file": str(state_file),
+            "report_file": str(report_file),
+            "next_cluster_index": idx,
+            "persistent_failure_count": len(persistent_failure_log),
+            "media_with_gps_count": len(points),
+            "media_with_gps_sampled": len(sampled_points),
+            "sample_ratio_requested": ratio,
+            "media_without_gps_count": len(without_gps),
+            "inference_worker_report": inference_worker_report,
+            "used_reverse_geocoding": False,
+        }
 
     leftover_media_examples = list(without_gps[:20])
     invalid_source_media: list[str] = []
@@ -1213,6 +2095,7 @@ def rename_folder_from_itinerary(
                                 "error": error_payload,
                                 "moved_media_with_gps_count": moved_file_count,
                                 "invalid_source_media_count": len(invalid_source_media),
+                                "inference_worker_report": inference_worker_report,
                             }
                             write_json_file(state_file, failure_state)
                             combined_leftover = leftover_media_examples + invalid_source_media
@@ -1227,6 +2110,7 @@ def rename_folder_from_itinerary(
                                     "leftover_media_count": len(without_gps) + len(invalid_source_media),
                                     "leftover_media_examples": combined_leftover[:20],
                                     "invalid_source_media_count": len(invalid_source_media),
+                                    "inference_worker_report": inference_worker_report,
                                     "persistent_failure_summary": {
                                         "persistent_failure_count": len(persistent_failure_log),
                                     },
@@ -1246,6 +2130,7 @@ def rename_folder_from_itinerary(
                                 "leftover_media_count": len(without_gps) + len(invalid_source_media),
                                 "leftover_media_examples": combined_leftover[:20],
                                 "invalid_source_media_count": len(invalid_source_media),
+                                "inference_worker_report": inference_worker_report,
                                 "moved_media_with_gps_count": moved_file_count,
                                 "used_reverse_geocoding": False,
                             }
@@ -1272,6 +2157,7 @@ def rename_folder_from_itinerary(
             "persistent_failure_log": persistent_failure_log,
             "result_status": status,
             "invalid_source_media_count": len(invalid_source_media),
+            "inference_worker_report": inference_worker_report,
         }
         combined_leftover = leftover_media_examples + invalid_source_media
         write_json_file(state_file, completion_state)
@@ -1285,6 +2171,7 @@ def rename_folder_from_itinerary(
                 "leftover_media_count": len(without_gps) + len(invalid_source_media),
                 "leftover_media_examples": combined_leftover[:20],
                 "invalid_source_media_count": len(invalid_source_media),
+                "inference_worker_report": inference_worker_report,
                 "persistent_failure_summary": {
                     "persistent_failure_count": len(persistent_failure_log),
                 },
@@ -1304,6 +2191,7 @@ def rename_folder_from_itinerary(
             "leftover_media_examples": combined_leftover[:20],
             "invalid_source_media_count": len(invalid_source_media),
             "invalid_source_media_examples": invalid_source_media[:20],
+            "inference_worker_report": inference_worker_report,
             "moved_media_with_gps_count": moved_file_count,
             "used_reverse_geocoding": False,
         }
@@ -1340,6 +2228,7 @@ def rename_folder_from_itinerary(
                 "persistent_failure_log": persistent_failure_log,
                 "error": error_payload,
                 "target_name": target_path.name,
+                "inference_worker_report": inference_worker_report,
             }
             write_json_file(state_file, failure_state)
             write_json_file(
@@ -1352,6 +2241,7 @@ def rename_folder_from_itinerary(
                     "error": error_payload,
                     "leftover_media_count": len(without_gps),
                     "leftover_media_examples": leftover_media_examples,
+                    "inference_worker_report": inference_worker_report,
                     "persistent_failure_summary": {
                         "persistent_failure_count": len(persistent_failure_log),
                     },
@@ -1371,6 +2261,7 @@ def rename_folder_from_itinerary(
                 "media_without_gps_count": len(without_gps),
                 "leftover_media_count": len(without_gps),
                 "leftover_media_examples": leftover_media_examples,
+                "inference_worker_report": inference_worker_report,
                 "used_reverse_geocoding": False,
             }
 
@@ -1385,6 +2276,7 @@ def rename_folder_from_itinerary(
         "result_status": status,
         "target_name": target_path.name,
         "leftover_media_count": len(without_gps),
+        "inference_worker_report": inference_worker_report,
     }
     write_json_file(state_file, completion_state)
     write_json_file(
@@ -1396,6 +2288,7 @@ def rename_folder_from_itinerary(
             "target_name": target_path.name,
             "leftover_media_count": len(without_gps),
             "leftover_media_examples": leftover_media_examples,
+            "inference_worker_report": inference_worker_report,
             "persistent_failure_summary": {
                 "persistent_failure_count": len(persistent_failure_log),
             },
@@ -1414,6 +2307,7 @@ def rename_folder_from_itinerary(
         "media_without_gps_count": len(without_gps),
         "leftover_media_count": len(without_gps),
         "leftover_media_examples": leftover_media_examples,
+        "inference_worker_report": inference_worker_report,
         "used_reverse_geocoding": False,
     }
 
@@ -1499,6 +2393,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of landmarks kept in final day folder name",
     )
     parser.add_argument(
+        "--inference-workers",
+        type=lambda raw: parse_positive_int_arg(raw, name="inference-workers"),
+        default=3,
+        help="Parallel workers for independent landmark inference",
+    )
+    parser.add_argument(
         "--state-file",
         help="Optional path to processing state JSON file",
     )
@@ -1542,6 +2442,7 @@ def main() -> int:
             opencode_retries=args.opencode_max_attempts,
             opencode_backoff_sec=args.opencode_initial_backoff_sec,
             opencode_model=args.opencode_model,
+            inference_workers=args.inference_workers,
             state_file=Path(args.state_file).expanduser().resolve() if args.state_file else None,
             report_file=Path(args.report_file).expanduser().resolve() if args.report_file else None,
             resume=not args.no_resume,
@@ -1559,6 +2460,7 @@ def main() -> int:
             opencode_retries=args.opencode_max_attempts,
             opencode_backoff_sec=args.opencode_initial_backoff_sec,
             opencode_model=args.opencode_model,
+            inference_workers=args.inference_workers,
             resume=not args.no_resume,
         )
     print(json.dumps(result, ensure_ascii=True, indent=2))
