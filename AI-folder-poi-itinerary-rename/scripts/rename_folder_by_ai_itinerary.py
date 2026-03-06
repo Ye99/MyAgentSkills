@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -27,7 +28,6 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
-from typing import Callable
 
 
 DATE_PREFIX_RE = re.compile(r"^(\d{4}_\d{2}_\d{2})")
@@ -272,8 +272,6 @@ class LocationCluster:
         return self.points[-1].timestamp
 
 
-InferFunc = Callable[[float, float, datetime | None, datetime | None, int], str]
-
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius_m = 6_371_000.0
@@ -359,6 +357,9 @@ def extract_media_points(folder: Path) -> tuple[list[MediaPoint], list[str]]:
         if not isinstance(lat, (float, int)) or not isinstance(lon, (float, int)):
             without_gps.append(src)
             continue
+        if float(lat) == 0.0 and float(lon) == 0.0:
+            without_gps.append(src)
+            continue
         if timestamp is None:
             timestamp = datetime.min
         points.append(MediaPoint(source_file=src, lat=float(lat), lon=float(lon), timestamp=timestamp))
@@ -428,6 +429,8 @@ def load_completed_infos_by_index(previous_state: dict[str, Any] | None) -> dict
             landmark = raw_info.get("landmark")
             country = raw_info.get("country")
             if isinstance(landmark, str) and isinstance(country, str):
+                landmark = normalize_landmark_token(landmark)
+                country = normalize_country_name(country)
                 completed[int(raw_idx)] = {"landmark": landmark, "country": country}
         if completed:
             return completed
@@ -440,6 +443,8 @@ def load_completed_infos_by_index(previous_state: dict[str, Any] | None) -> dict
             landmark = item.get("landmark")
             country = item.get("country")
             if isinstance(landmark, str) and isinstance(country, str):
+                landmark = normalize_landmark_token(landmark)
+                country = normalize_country_name(country)
                 completed[idx] = {"landmark": landmark, "country": country}
     return completed
 
@@ -529,7 +534,22 @@ def parse_json_payload(stdout: str) -> dict[str, Any] | None:
 
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    content = json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=f".{path.name}.")
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1  # mark as closed
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def read_json_file(path: Path) -> dict[str, Any] | None:
@@ -759,105 +779,6 @@ def infer_landmark_info(
         cache[rounded] = dict(result)
     return result
 
-
-def infer_landmark_token(
-    lat: float,
-    lon: float,
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
-    sample_count: int = 0,
-    opencode_timeout_sec: int = 180,
-    opencode_retries: int = 5,
-    opencode_backoff_sec: float = 3.0,
-    opencode_model: str | None = None,
-    cache: dict[tuple[float, float], str] | None = None,
-) -> str:
-    rounded = (round(lat, 4), round(lon, 4))
-    if cache is not None and rounded in cache:
-        return cache[rounded]
-
-    info_cache: dict[tuple[float, float], dict[str, str]] | None = None
-    if cache is not None:
-        info_cache = {}
-        for key, value in cache.items():
-            info_cache[key] = {"landmark": value, "country": "UnknownCountry"}
-
-    info = infer_landmark_info(
-        lat,
-        lon,
-        start_time=start_time,
-        end_time=end_time,
-        sample_count=sample_count,
-        opencode_timeout_sec=opencode_timeout_sec,
-        opencode_retries=opencode_retries,
-        opencode_backoff_sec=opencode_backoff_sec,
-        opencode_model=opencode_model,
-        cache=info_cache,
-        strict=False,
-    )
-    token = info.get("landmark", UNKNOWN_LANDMARK)
-
-    if token.casefold() in {"unknown", "unknownlandmark"}:
-        token = UNKNOWN_LANDMARK
-
-    if cache is not None:
-        cache[rounded] = token
-    return token
-
-
-def build_itinerary_landmarks(
-    points: list[MediaPoint],
-    infer_func: InferFunc | None = None,
-    cluster_distance_m: float = 2_000.0,
-    opencode_timeout_sec: int = 180,
-    opencode_retries: int = 5,
-    opencode_backoff_sec: float = 3.0,
-    opencode_model: str | None = None,
-) -> list[str]:
-    clusters = cluster_media_points(points, cluster_distance_m=cluster_distance_m)
-    if infer_func is None:
-        cache: dict[tuple[float, float], str] = {}
-
-        def _default_infer(
-            lat: float,
-            lon: float,
-            start_time: datetime | None,
-            end_time: datetime | None,
-            sample_count: int,
-        ) -> str:
-            return infer_landmark_token(
-                lat,
-                lon,
-                start_time=start_time,
-                end_time=end_time,
-                sample_count=sample_count,
-                opencode_timeout_sec=opencode_timeout_sec,
-                opencode_retries=opencode_retries,
-                opencode_backoff_sec=opencode_backoff_sec,
-                opencode_model=opencode_model,
-                cache=cache,
-            )
-
-        infer_func = _default_infer
-
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for cluster in clusters:
-        centroid_lat, centroid_lon = cluster.centroid
-        token = infer_func(
-            centroid_lat,
-            centroid_lon,
-            cluster.start_time,
-            cluster.end_time,
-            len(cluster.points),
-        )
-        if not token or token == UNKNOWN_LANDMARK:
-            continue
-        if token in seen:
-            continue
-        seen.add(token)
-        tokens.append(token)
-    return tokens
 
 
 def _cluster_inference_key(cluster: LocationCluster) -> tuple[float, float]:
@@ -1420,13 +1341,14 @@ def infer_pending_cluster_infos(
         )
         failed_idx = key_members[failed_key][0][0]
         failure_exc = failures_by_key[failed_key]
+        # Preserve ALL successfully completed results regardless of index,
+        # not just those below failed_idx.  Higher-index results completed
+        # by other workers were previously discarded, requiring re-inference.
         for idx, cluster in ordered_pending:
-            if idx >= failed_idx:
-                break
             key = _cluster_inference_key(cluster)
             info = results_by_key.get(key)
             if info is None:
-                break
+                continue
             completed.append((idx, cluster, info))
         failed_cluster = key_members[failed_key][0][1]
         worker_report["tasks_succeeded"] = len(completed)
@@ -1542,14 +1464,41 @@ def build_target_folder_name(date_prefix: str, landmarks: list[str]) -> str:
     return f"{date_prefix}_{','.join(landmarks)}"
 
 
+# Module-level lock to serialize find_available_target + rename in tree mode,
+# preventing TOCTOU races when multiple folders produce the same target name.
+_RENAME_LOCK = threading.Lock()
+
+
+def _validate_target_within_parent(parent: Path, target: Path) -> None:
+    """Raise ValueError if *target* escapes *parent* (path traversal guard)."""
+    resolved_parent = parent.resolve()
+    if target.exists():
+        resolved_target = target.resolve()
+    else:
+        # For non-existent paths we must resolve the *parent* of the target
+        # and then re-attach the final component.  Using just target.name would
+        # strip directory-traversal segments like "../escape".
+        resolved_target = (target.parent.resolve() / target.name)
+    # Use os.path.commonpath to avoid symlink tricks
+    try:
+        common = Path(os.path.commonpath([resolved_parent, resolved_target]))
+    except ValueError:
+        raise ValueError(f"target path escapes parent directory: {target}")
+    if common != resolved_parent:
+        raise ValueError(f"target path escapes parent directory: {target}")
+
+
 def find_available_target(source_folder: Path, target_name: str) -> Path:
-    candidate = source_folder.parent / target_name
+    parent = source_folder.parent
+    candidate = parent / target_name
+    _validate_target_within_parent(parent, candidate)
     if not candidate.exists() or candidate == source_folder:
         return candidate
 
     suffix = 2
     while True:
-        numbered = source_folder.parent / f"{target_name}_{suffix}"
+        numbered = parent / f"{target_name}_{suffix}"
+        _validate_target_within_parent(parent, numbered)
         if not numbered.exists():
             return numbered
         suffix += 1
@@ -1566,6 +1515,8 @@ def discover_day_folders(root: Path) -> list[Path]:
     discovered: list[Path] = []
     for dirpath, dirnames, _filenames in os.walk(root):
         parent = Path(dirpath)
+        # Skip symlinked subdirectories to avoid infinite loops
+        dirnames[:] = [d for d in dirnames if not (parent / d).is_symlink()]
         for dirname in dirnames:
             if DAY_FOLDER_EXACT_RE.match(dirname):
                 discovered.append(parent / dirname)
@@ -1824,7 +1775,121 @@ def process_folder_tree(
     }
     write_json_file(default_tree_report_file(root), tree_report_payload)
 
+    # Clean up orphaned per-folder state/report files for successfully renamed
+    # folders.  After a rename the original state/report paths reference the old
+    # folder name and become stale; remove them unless they sit inside a still-
+    # existing source folder (which would mean the rename didn't actually happen).
+    if apply:
+        for result in materialized_results:
+            if str(result.get("status") or "") != "renamed":
+                continue
+            for key in ("state_file", "report_file"):
+                raw = result.get(key)
+                if not isinstance(raw, str):
+                    continue
+                orphan = Path(raw)
+                if orphan.exists() and not Path(str(result.get("folder_path", ""))).exists():
+                    try:
+                        orphan.unlink()
+                    except OSError:
+                        pass
+
     return summary
+
+
+def _handle_inference_failure(
+    *,
+    failure: tuple[int, LocationCluster, InferenceExhaustedError],
+    folder: Path,
+    state_file: Path,
+    report_file: Path,
+    current_config: dict[str, Any],
+    input_fingerprint: str,
+    completed_infos_by_index: dict[int, dict[str, str]],
+    persistent_failure_log: list[dict[str, Any]],
+    inference_worker_report: dict[str, Any],
+    points_count: int,
+    sampled_count: int,
+    ratio: float,
+    media_without_gps_count: int,
+    media_without_gps_examples: list[str],
+    media_without_gps_ratio_value: float,
+) -> dict[str, object]:
+    """Record an inference failure to state/report files and return a result dict.
+
+    Shared by both primary and fallback inference failure paths.
+    """
+    idx, cluster, exc = failure
+    c_lat, c_lon = cluster.centroid
+    failure_entry: dict[str, Any] = {
+        "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "cluster_index": idx,
+        "cluster_centroid": {"lat": c_lat, "lon": c_lon},
+        "cluster_start": cluster.start_time.isoformat(),
+        "cluster_end": cluster.end_time.isoformat(),
+        "cluster_sample_count": len(cluster.points),
+        "error_message": str(exc),
+        "attempt_count": exc.attempt_count,
+        "attempt_failures": exc.attempt_failures,
+    }
+    persistent_failure_log.append(failure_entry)
+
+    error_info: dict[str, Any] = {
+        "message": str(exc),
+        "attempt_count": exc.attempt_count,
+    }
+    state_payload: dict[str, Any] = {
+        "folder_path": str(folder),
+        "status": "failed-inference",
+        "config": current_config,
+        "input_fingerprint": input_fingerprint,
+        "next_cluster_index": idx,
+        "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
+        "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
+        "persistent_failure_count": len(persistent_failure_log),
+        "persistent_failure_log": persistent_failure_log,
+        "error": error_info,
+        "inference_worker_report": inference_worker_report,
+    }
+    write_json_file(state_file, state_payload)
+
+    persistent_failure_summary: dict[str, Any] = {
+        "persistent_failure_count": len(persistent_failure_log),
+        "last_failed_cluster_index": idx,
+        "last_error_message": str(exc),
+        "last_error_attempt_count": exc.attempt_count,
+    }
+    report_payload: dict[str, Any] = {
+        "status": "failed-inference",
+        "folder_path": str(folder),
+        "state_file": str(state_file),
+        "next_cluster_index": idx,
+        "error": error_info,
+        "media_without_gps_count": media_without_gps_count,
+        "media_without_gps_examples": media_without_gps_examples,
+        "media_without_gps_ratio": media_without_gps_ratio_value,
+        "persistent_failure_summary": persistent_failure_summary,
+        "inference_worker_report": inference_worker_report,
+        "used_reverse_geocoding": False,
+    }
+    write_json_file(report_file, report_payload)
+
+    return {
+        "folder_path": str(folder),
+        "status": "failed-inference",
+        "state_file": str(state_file),
+        "report_file": str(report_file),
+        "next_cluster_index": idx,
+        "persistent_failure_count": len(persistent_failure_log),
+        "media_with_gps_count": points_count,
+        "media_with_gps_sampled": sampled_count,
+        "sample_ratio_requested": ratio,
+        "media_without_gps_count": media_without_gps_count,
+        "media_without_gps_examples": media_without_gps_examples,
+        "media_without_gps_ratio": media_without_gps_ratio_value,
+        "inference_worker_report": inference_worker_report,
+        "used_reverse_geocoding": False,
+    }
 
 
 def rename_folder_from_itinerary(
@@ -1961,12 +2026,15 @@ def rename_folder_from_itinerary(
     for idx, cluster, info in completed_pending_infos:
         completed_infos_by_index[idx] = info
         cluster_infos.append((cluster, info))
+
+    if completed_pending_infos:
+        last_idx = completed_pending_infos[-1][0]
         state_payload = {
             "folder_path": str(folder),
             "status": "in-progress",
             "config": current_config,
             "input_fingerprint": input_fingerprint,
-            "next_cluster_index": idx + 1,
+            "next_cluster_index": last_idx + 1,
             "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
             "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
             "persistent_failure_count": len(persistent_failure_log),
@@ -1975,75 +2043,23 @@ def rename_folder_from_itinerary(
         write_json_file(state_file, state_payload)
 
     if pending_failure is not None:
-        idx, cluster, exc = pending_failure
-        c_lat, c_lon = cluster.centroid
-        failure_entry: dict[str, Any] = {
-            "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "cluster_index": idx,
-            "cluster_centroid": {"lat": c_lat, "lon": c_lon},
-            "cluster_start": cluster.start_time.isoformat(),
-            "cluster_end": cluster.end_time.isoformat(),
-            "cluster_sample_count": len(cluster.points),
-            "error_message": str(exc),
-            "attempt_count": exc.attempt_count,
-            "attempt_failures": exc.attempt_failures,
-        }
-        persistent_failure_log.append(failure_entry)
-
-        state_payload = {
-            "folder_path": str(folder),
-            "status": "failed-inference",
-            "config": current_config,
-            "input_fingerprint": input_fingerprint,
-            "next_cluster_index": idx,
-            "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
-            "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
-            "persistent_failure_count": len(persistent_failure_log),
-            "persistent_failure_log": persistent_failure_log,
-            "error": {
-                "message": str(exc),
-                "attempt_count": exc.attempt_count,
-            },
-            "inference_worker_report": inference_worker_report,
-        }
-        write_json_file(state_file, state_payload)
-
-        persistent_failure_summary: dict[str, Any] = {
-            "persistent_failure_count": len(persistent_failure_log),
-            "last_failed_cluster_index": idx,
-            "last_error_message": str(exc),
-            "last_error_attempt_count": exc.attempt_count,
-        }
-        report_payload: dict[str, Any] = {
-            "status": "failed-inference",
-            "folder_path": str(folder),
-            "state_file": str(state_file),
-            "next_cluster_index": idx,
-            "error": state_payload["error"],
-            "media_without_gps_count": media_without_gps_count,
-            "media_without_gps_examples": media_without_gps_examples,
-            "media_without_gps_ratio": media_without_gps_ratio_value,
-            "persistent_failure_summary": persistent_failure_summary,
-            "inference_worker_report": inference_worker_report,
-            "used_reverse_geocoding": False,
-        }
-        write_json_file(report_file, report_payload)
-        return {
-            "folder_path": str(folder),
-            "status": "failed-inference",
-            "state_file": str(state_file),
-            "report_file": str(report_file),
-            "next_cluster_index": idx,
-            "persistent_failure_count": len(persistent_failure_log),
-            "media_with_gps_count": len(points),
-            "media_with_gps_sampled": len(sampled_points),
-            "sample_ratio_requested": ratio,
-            "media_without_gps_count": media_without_gps_count,
-            "media_without_gps_examples": media_without_gps_examples,
-            "media_without_gps_ratio": media_without_gps_ratio_value,
-            "inference_worker_report": inference_worker_report,
-            "used_reverse_geocoding": False,
-        }
+        return _handle_inference_failure(
+            failure=pending_failure,
+            folder=folder,
+            state_file=state_file,
+            report_file=report_file,
+            current_config=current_config,
+            input_fingerprint=input_fingerprint,
+            completed_infos_by_index=completed_infos_by_index,
+            persistent_failure_log=persistent_failure_log,
+            inference_worker_report=inference_worker_report,
+            points_count=len(points),
+            sampled_count=len(sampled_points),
+            ratio=ratio,
+            media_without_gps_count=media_without_gps_count,
+            media_without_gps_examples=media_without_gps_examples,
+            media_without_gps_ratio_value=media_without_gps_ratio_value,
+        )
 
     if ratio >= 1.0 and max_landmarks > 0:
         inferred_landmarks = {
@@ -2074,12 +2090,15 @@ def rename_folder_from_itinerary(
             for idx, cluster, info in completed_fallback_infos:
                 completed_infos_by_index[idx] = info
                 cluster_infos.append((cluster, info))
+
+            if completed_fallback_infos:
+                last_idx = completed_fallback_infos[-1][0]
                 state_payload = {
                     "folder_path": str(folder),
                     "status": "in-progress",
                     "config": current_config,
                     "input_fingerprint": input_fingerprint,
-                    "next_cluster_index": idx + 1,
+                    "next_cluster_index": last_idx + 1,
                     "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
                     "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
                     "persistent_failure_count": len(persistent_failure_log),
@@ -2088,75 +2107,23 @@ def rename_folder_from_itinerary(
                 write_json_file(state_file, state_payload)
 
             if fallback_failure is not None:
-                idx, cluster, exc = fallback_failure
-                c_lat, c_lon = cluster.centroid
-                failure_entry = {
-                    "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    "cluster_index": idx,
-                    "cluster_centroid": {"lat": c_lat, "lon": c_lon},
-                    "cluster_start": cluster.start_time.isoformat(),
-                    "cluster_end": cluster.end_time.isoformat(),
-                    "cluster_sample_count": len(cluster.points),
-                    "error_message": str(exc),
-                    "attempt_count": exc.attempt_count,
-                    "attempt_failures": exc.attempt_failures,
-                }
-                persistent_failure_log.append(failure_entry)
-
-                state_payload = {
-                    "folder_path": str(folder),
-                    "status": "failed-inference",
-                    "config": current_config,
-                    "input_fingerprint": input_fingerprint,
-                    "next_cluster_index": idx,
-                    "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
-                    "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
-                    "persistent_failure_count": len(persistent_failure_log),
-                    "persistent_failure_log": persistent_failure_log,
-                    "error": {
-                        "message": str(exc),
-                        "attempt_count": exc.attempt_count,
-                    },
-                    "inference_worker_report": inference_worker_report,
-                }
-                write_json_file(state_file, state_payload)
-
-                persistent_failure_summary = {
-                    "persistent_failure_count": len(persistent_failure_log),
-                    "last_failed_cluster_index": idx,
-                    "last_error_message": str(exc),
-                    "last_error_attempt_count": exc.attempt_count,
-                }
-                report_payload = {
-                    "status": "failed-inference",
-                    "folder_path": str(folder),
-                    "state_file": str(state_file),
-                    "next_cluster_index": idx,
-                    "error": state_payload["error"],
-                    "media_without_gps_count": media_without_gps_count,
-                    "media_without_gps_examples": media_without_gps_examples,
-                    "media_without_gps_ratio": media_without_gps_ratio_value,
-                    "persistent_failure_summary": persistent_failure_summary,
-                    "inference_worker_report": inference_worker_report,
-                    "used_reverse_geocoding": False,
-                }
-                write_json_file(report_file, report_payload)
-                return {
-                    "folder_path": str(folder),
-                    "status": "failed-inference",
-                    "state_file": str(state_file),
-                    "report_file": str(report_file),
-                    "next_cluster_index": idx,
-                    "persistent_failure_count": len(persistent_failure_log),
-                    "media_with_gps_count": len(points),
-                    "media_with_gps_sampled": len(sampled_points),
-                    "sample_ratio_requested": ratio,
-                    "media_without_gps_count": media_without_gps_count,
-                    "media_without_gps_examples": media_without_gps_examples,
-                    "media_without_gps_ratio": media_without_gps_ratio_value,
-                    "inference_worker_report": inference_worker_report,
-                    "used_reverse_geocoding": False,
-                }
+                return _handle_inference_failure(
+                    failure=fallback_failure,
+                    folder=folder,
+                    state_file=state_file,
+                    report_file=report_file,
+                    current_config=current_config,
+                    input_fingerprint=input_fingerprint,
+                    completed_infos_by_index=completed_infos_by_index,
+                    persistent_failure_log=persistent_failure_log,
+                    inference_worker_report=inference_worker_report,
+                    points_count=len(points),
+                    sampled_count=len(sampled_points),
+                    ratio=ratio,
+                    media_without_gps_count=media_without_gps_count,
+                    media_without_gps_examples=media_without_gps_examples,
+                    media_without_gps_ratio_value=media_without_gps_ratio_value,
+                )
 
     cluster_infos.sort(key=lambda item: item[0].start_time)
 
@@ -2171,69 +2138,78 @@ def rename_folder_from_itinerary(
         max_landmarks=max_landmarks,
     )
     target_name = build_target_folder_name(date_prefix, landmarks)
-    target_path = find_available_target(folder, target_name)
 
     status = "planned-rename"
     if not landmarks:
         status = "skipped-no-landmark"
-    elif apply and target_path != folder:
-        try:
-            folder.rename(target_path)
-            status = "renamed"
-        except OSError as exc:
-            error_payload = {
-                "message": str(exc),
-                "failure_type": "apply-rename",
-                "target_name": target_path.name,
-            }
-            failure_state: dict[str, Any] = {
-                "folder_path": str(folder),
-                "status": "failed-rename",
-                "config": current_config,
-                "input_fingerprint": input_fingerprint,
-                "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
-                "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
-                "persistent_failure_count": len(persistent_failure_log),
-                "persistent_failure_log": persistent_failure_log,
-                "error": error_payload,
-                "target_name": target_path.name,
-                "inference_worker_report": inference_worker_report,
-            }
-            write_json_file(state_file, failure_state)
-            write_json_file(
-                report_file,
-                {
-                    "status": "failed-rename",
-                    "folder_path": str(folder),
-                    "state_file": str(state_file),
-                    "target_name": target_path.name,
-                    "error": error_payload,
-                    "media_without_gps_count": media_without_gps_count,
-                    "media_without_gps_examples": media_without_gps_examples,
-                    "media_without_gps_ratio": media_without_gps_ratio_value,
-                    "inference_worker_report": inference_worker_report,
-                    "persistent_failure_summary": {
+        target_path = find_available_target(folder, target_name)
+    elif apply:
+        # Lock to prevent TOCTOU race: find_available_target checks existence,
+        # then folder.rename acts on it.  Without the lock two concurrent
+        # workers choosing the same target_name could both see "not exists" and
+        # then one rename silently overwrites the other on Linux.
+        with _RENAME_LOCK:
+            target_path = find_available_target(folder, target_name)
+            if target_path != folder:
+                try:
+                    folder.rename(target_path)
+                    status = "renamed"
+                except OSError as exc:
+                    error_payload = {
+                        "message": str(exc),
+                        "failure_type": "apply-rename",
+                        "target_name": target_path.name,
+                    }
+                    failure_state: dict[str, Any] = {
+                        "folder_path": str(folder),
+                        "status": "failed-rename",
+                        "config": current_config,
+                        "input_fingerprint": input_fingerprint,
+                        "completed_cluster_infos": serialize_completed_infos_list(completed_infos_by_index),
+                        "completed_cluster_infos_by_index": serialize_completed_infos_by_index(completed_infos_by_index),
                         "persistent_failure_count": len(persistent_failure_log),
-                    },
-                    "used_reverse_geocoding": False,
-                },
-            )
-            return {
-                "folder_path": str(folder),
-                "status": "failed-rename",
-                "state_file": str(state_file),
-                "report_file": str(report_file),
-                "target_name": target_path.name,
-                "error": error_payload,
-                "media_with_gps_count": len(points),
-                "media_with_gps_sampled": len(sampled_points),
-                "sample_ratio_requested": ratio,
-                "media_without_gps_count": media_without_gps_count,
-                "media_without_gps_examples": media_without_gps_examples,
-                "media_without_gps_ratio": media_without_gps_ratio_value,
-                "inference_worker_report": inference_worker_report,
-                "used_reverse_geocoding": False,
-            }
+                        "persistent_failure_log": persistent_failure_log,
+                        "error": error_payload,
+                        "target_name": target_path.name,
+                        "inference_worker_report": inference_worker_report,
+                    }
+                    write_json_file(state_file, failure_state)
+                    write_json_file(
+                        report_file,
+                        {
+                            "status": "failed-rename",
+                            "folder_path": str(folder),
+                            "state_file": str(state_file),
+                            "target_name": target_path.name,
+                            "error": error_payload,
+                            "media_without_gps_count": media_without_gps_count,
+                            "media_without_gps_examples": media_without_gps_examples,
+                            "media_without_gps_ratio": media_without_gps_ratio_value,
+                            "inference_worker_report": inference_worker_report,
+                            "persistent_failure_summary": {
+                                "persistent_failure_count": len(persistent_failure_log),
+                            },
+                            "used_reverse_geocoding": False,
+                        },
+                    )
+                    return {
+                        "folder_path": str(folder),
+                        "status": "failed-rename",
+                        "state_file": str(state_file),
+                        "report_file": str(report_file),
+                        "target_name": target_path.name,
+                        "error": error_payload,
+                        "media_with_gps_count": len(points),
+                        "media_with_gps_sampled": len(sampled_points),
+                        "sample_ratio_requested": ratio,
+                        "media_without_gps_count": media_without_gps_count,
+                        "media_without_gps_examples": media_without_gps_examples,
+                        "media_without_gps_ratio": media_without_gps_ratio_value,
+                        "inference_worker_report": inference_worker_report,
+                        "used_reverse_geocoding": False,
+                    }
+    else:
+        target_path = find_available_target(folder, target_name)
 
     completion_state = {
         "folder_path": str(folder),
@@ -2272,6 +2248,8 @@ def rename_folder_from_itinerary(
     return {
         "folder_path": str(folder),
         "status": status,
+        "state_file": str(state_file),
+        "report_file": str(report_file),
         "target_name": target_path.name,
         "landmarks": landmarks,
         "media_with_gps_count": len(points),

@@ -98,29 +98,6 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         payload = mod.parse_json_payload('notes\n{"landmark_name":"Skogafoss"}\nmore')
         self.assertEqual(payload, {"landmark_name": "Skogafoss"})
 
-    def test_infer_landmark_token_uses_opencode_and_normalizes(self) -> None:
-        with patch("rename_folder_by_ai_itinerary.shutil.which", return_value="/usr/bin/opencode"):
-            with patch(
-                "rename_folder_by_ai_itinerary.subprocess.run",
-                return_value=subprocess.CompletedProcess(
-                    args=["opencode"],
-                    returncode=0,
-                    stdout='{"landmark_name":"Fjaðrárgljúfur canyon"}\n',
-                    stderr="",
-                ),
-            ):
-                token = mod.infer_landmark_token(63.7789, -18.1767)
-        self.assertEqual(token, "FjarargljufurCanyon")
-
-    def test_infer_landmark_token_returns_unknown_on_failure(self) -> None:
-        with patch("rename_folder_by_ai_itinerary.shutil.which", return_value="/usr/bin/opencode"):
-            with patch(
-                "rename_folder_by_ai_itinerary.subprocess.run",
-                return_value=subprocess.CompletedProcess(args=["opencode"], returncode=1, stdout="", stderr="boom"),
-            ):
-                token = mod.infer_landmark_token(64.048, -16.181)
-        self.assertEqual(token, "UnknownLandmark")
-
     def test_infer_landmark_info_retries_with_exponential_backoff(self) -> None:
         timeout_error = subprocess.TimeoutExpired(cmd=["opencode"], timeout=1)
         with patch("rename_folder_by_ai_itinerary.shutil.which", return_value="/usr/bin/opencode"):
@@ -217,23 +194,6 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 info = mod.infer_landmark_info(63.5321, -19.5116, strict=True)
 
         self.assertEqual(info["country"], "UnknownCountry")
-
-    def test_build_itinerary_landmarks_keeps_order_and_dedupes(self) -> None:
-        points = [
-            mod.MediaPoint("a.jpg", 10.0, 10.0, datetime(2025, 7, 24, 9, 0, 0)),
-            mod.MediaPoint("b.jpg", 10.0001, 10.0001, datetime(2025, 7, 24, 9, 5, 0)),
-            mod.MediaPoint("c.jpg", 20.0, 20.0, datetime(2025, 7, 24, 12, 0, 0)),
-            mod.MediaPoint("d.jpg", 10.0002, 10.0002, datetime(2025, 7, 24, 16, 0, 0)),
-        ]
-
-        def fake_infer(lat: float, lon: float, _: datetime | None, __: datetime | None, ___: int) -> str:
-            if lat < 15:
-                return "FirstSpot"
-            return "SecondSpot"
-
-        tokens = mod.build_itinerary_landmarks(points, infer_func=fake_infer, cluster_distance_m=1_000)
-
-        self.assertEqual(tokens, ["FirstSpot", "SecondSpot"])
 
     def test_sample_points_respects_ratio(self) -> None:
         base_time = datetime(2025, 1, 1, 0, 0, 0)
@@ -1278,6 +1238,255 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self.assertEqual(summary["total_folder_count"], 2)
         self.assertEqual(summary["failed_folder_count"], 1)
         self.assertEqual(summary["skipped_folder_count"], 1)
+
+    # ── Coverage-gap tests for review recommendations ───────────────
+
+    def test_write_json_file_atomic_creates_file(self) -> None:
+        """write_json_file uses atomic write (temp + replace), producing valid JSON."""
+        with TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "out.json"
+            mod.write_json_file(target, {"key": "value"})
+            self.assertTrue(target.exists())
+            loaded = json.loads(target.read_text())
+            self.assertEqual(loaded, {"key": "value"})
+
+    def test_write_json_file_atomic_no_leftover_temp_on_success(self) -> None:
+        """After successful atomic write, no .tmp files remain."""
+        with TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "out.json"
+            mod.write_json_file(target, {"a": 1})
+            leftovers = list(Path(tmpdir).glob("*.tmp"))
+            self.assertEqual(leftovers, [])
+
+    def test_write_json_file_atomic_cleans_temp_on_error(self) -> None:
+        """If os.write raises, the temp file is cleaned up."""
+        with TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "out.json"
+            with patch("rename_folder_by_ai_itinerary.os.write", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    mod.write_json_file(target, {"a": 1})
+            leftovers = list(Path(tmpdir).glob("*.tmp"))
+            self.assertEqual(leftovers, [])
+            self.assertFalse(target.exists())
+
+    def test_load_completed_infos_renormalizes_landmarks(self) -> None:
+        """Landmarks loaded from state file are re-normalized through normalize_landmark_token."""
+        state: dict[str, Any] = {
+            "completed_cluster_infos_by_index": {
+                "0": {"landmark": "fjaðrárgljúfur canyon", "country": "ISL"},
+                "1": {"landmark": "Skógafoss", "country": "ISL"},
+            }
+        }
+        result = mod.load_completed_infos_by_index(state)
+        self.assertEqual(result[0]["landmark"], "FjarargljufurCanyon")
+        self.assertEqual(result[1]["landmark"], "Skogafoss")
+
+    def test_load_completed_infos_renormalizes_countries(self) -> None:
+        """Countries loaded from state file are re-normalized through normalize_country_name."""
+        state: dict[str, Any] = {
+            "completed_cluster_infos_by_index": {
+                "0": {"landmark": "Skogafoss", "country": "Iceland"},
+            }
+        }
+        result = mod.load_completed_infos_by_index(state)
+        # "Iceland" is not a 3-letter ISO code, so normalize_country_name returns UnknownCountry
+        self.assertEqual(result[0]["country"], "UnknownCountry")
+
+    def test_validate_target_within_parent_rejects_traversal(self) -> None:
+        """_validate_target_within_parent raises ValueError on path traversal."""
+        with TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir) / "parent"
+            parent.mkdir()
+            outside = Path(tmpdir) / "outside"
+            with self.assertRaises(ValueError):
+                mod._validate_target_within_parent(parent, outside)
+
+    def test_validate_target_within_parent_accepts_child(self) -> None:
+        """_validate_target_within_parent does not raise for a path within parent."""
+        with TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            child = parent / "child_dir"
+            # Should not raise
+            mod._validate_target_within_parent(parent, child)
+
+    def test_find_available_target_rejects_path_traversal(self) -> None:
+        """find_available_target calls _validate_target_within_parent and rejects traversal."""
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "2025_07_24"
+            source.mkdir()
+            with self.assertRaises(ValueError):
+                mod.find_available_target(source, "../escape")
+
+    def test_extract_media_points_filters_zero_zero_gps(self) -> None:
+        """GPS coordinates (0, 0) are treated as missing GPS."""
+        records = [
+            {
+                "SourceFile": "/tmp/day/a.jpg",
+                "GPSLatitude": 0.0,
+                "GPSLongitude": 0.0,
+                "DateTimeOriginal": "2025:07:23 09:00:00",
+            },
+            {
+                "SourceFile": "/tmp/day/b.jpg",
+                "GPSLatitude": 64.2500,
+                "GPSLongitude": -15.2040,
+                "DateTimeOriginal": "2025:07:23 10:00:00",
+            },
+        ]
+        with patch(
+            "rename_folder_by_ai_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["exiftool"], returncode=0, stdout=json.dumps(records), stderr=""),
+        ):
+            points, without_gps = mod.extract_media_points(Path("/tmp/day"))
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].source_file, "/tmp/day/b.jpg")
+        self.assertIn("/tmp/day/a.jpg", without_gps)
+
+    def test_discover_day_folders_skips_symlinks(self) -> None:
+        """discover_day_folders skips symlinked subdirectories."""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            real_dir = root / "real"
+            real_dir.mkdir()
+            day = real_dir / "2025_07_24"
+            day.mkdir()
+            # Create a symlink loop
+            link = root / "link"
+            link.symlink_to(real_dir)
+
+            folders = mod.discover_day_folders(root)
+            # Only the real day folder should be found, not the symlinked one
+            folder_paths = [str(f) for f in folders]
+            self.assertIn(str(day), folder_paths)
+            # The symlinked day folder should be excluded
+            symlinked_day = link / "2025_07_24"
+            self.assertNotIn(str(symlinked_day), folder_paths)
+
+    def test_handle_inference_failure_writes_state_and_report(self) -> None:
+        """_handle_inference_failure writes state/report files and returns correct dict."""
+        with TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir) / "2025_07_24"
+            folder.mkdir()
+            state_file = Path(tmpdir) / ".state.json"
+            report_file = Path(tmpdir) / ".report.json"
+
+            exc = mod.InferenceExhaustedError("boom", attempt_count=3, attempt_failures=[])
+            cluster = mod.LocationCluster(
+                points=[mod.MediaPoint("a.jpg", 10.0, 20.0, datetime(2025, 7, 24, 9, 0, 0))]
+            )
+
+            result = mod._handle_inference_failure(
+                failure=(2, cluster, exc),
+                folder=folder,
+                state_file=state_file,
+                report_file=report_file,
+                current_config={"ratio": 1.0},
+                input_fingerprint="abc123",
+                completed_infos_by_index={},
+                persistent_failure_log=[],
+                inference_worker_report={},
+                points_count=5,
+                sampled_count=5,
+                ratio=1.0,
+                media_without_gps_count=1,
+                media_without_gps_examples=["/tmp/x.jpg"],
+                media_without_gps_ratio_value=0.2,
+            )
+
+            self.assertEqual(result["status"], "failed-inference")
+            self.assertEqual(result["next_cluster_index"], 2)
+            self.assertTrue(state_file.exists())
+            self.assertTrue(report_file.exists())
+            state_data = json.loads(state_file.read_text())
+            self.assertEqual(state_data["status"], "failed-inference")
+            report_data = json.loads(report_file.read_text())
+            self.assertEqual(report_data["status"], "failed-inference")
+
+    def test_orphaned_state_files_cleaned_after_tree_rename(self) -> None:
+        """After a tree apply-rename, orphaned state/report files for renamed folders are removed."""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            day_folder = root / "2025_07_24"
+            day_folder.mkdir()
+            renamed_target = root / "2025_07_24_Landmark"
+
+            # Pre-create state/report files named for the original folder
+            state_file = mod.default_state_file(day_folder)
+            report_file = mod.default_report_file(day_folder)
+
+            points = [
+                mod.MediaPoint(str(day_folder / "a.jpg"), 63.5, -19.5, datetime(2025, 7, 24, 9, 0)),
+            ]
+
+            def fake_extract(folder: Path) -> tuple[list[mod.MediaPoint], list[str]]:
+                return (points, [])
+
+            def fake_http_retry(**kwargs: Any) -> tuple[dict[str, Any], str]:
+                return {"landmark_name": "Landmark", "country_name": "ISL"}, "ses1"
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", side_effect=fake_extract):
+                with patch("rename_folder_by_ai_itinerary._run_opencode_http_with_retry", side_effect=fake_http_retry):
+                    summary = mod.process_folder_tree(root, apply=True, ratio=1.0)
+
+            # After rename, the original day_folder should not exist
+            self.assertFalse(day_folder.exists())
+            # The renamed folder should exist
+            self.assertTrue(renamed_target.exists())
+            # Orphaned state/report files should be cleaned up
+            self.assertFalse(state_file.exists(), f"State file should be cleaned up: {state_file}")
+            self.assertFalse(report_file.exists(), f"Report file should be cleaned up: {report_file}")
+
+    def test_batch_state_write_only_once_after_all_inferences(self) -> None:
+        """State file should be written once after all inferences complete, not per-cluster."""
+        with TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir) / "2025_07_24"
+            folder.mkdir()
+
+            points = [
+                mod.MediaPoint(str(folder / "a.jpg"), 10.0, 10.0, datetime(2025, 7, 24, 9, 0)),
+                mod.MediaPoint(str(folder / "b.jpg"), 20.0, 20.0, datetime(2025, 7, 24, 12, 0)),
+            ]
+
+            call_count = 0
+
+            def fake_extract(f: Path) -> tuple[list[mod.MediaPoint], list[str]]:
+                return (points, [])
+
+            call_sequence: list[str] = []
+            real_write_json_file = mod.write_json_file
+
+            def tracking_write_json_file(path: Path, payload: dict[str, Any]) -> None:
+                if ".ai-itinerary-state" in str(path):
+                    call_sequence.append(f"state-write:{payload.get('status', 'unknown')}")
+                real_write_json_file(path, payload)
+
+            http_call_count = 0
+
+            def fake_http_retry(**kwargs: Any) -> tuple[dict[str, Any], str]:
+                nonlocal http_call_count
+                http_call_count += 1
+                names = ["Landmark1", "Landmark2"]
+                name = names[http_call_count - 1] if http_call_count <= len(names) else "Other"
+                return {"landmark_name": name, "country_name": "TST"}, "ses1"
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", side_effect=fake_extract):
+                with patch("rename_folder_by_ai_itinerary._run_opencode_http_with_retry", side_effect=fake_http_retry):
+                    with patch("rename_folder_by_ai_itinerary.write_json_file", side_effect=tracking_write_json_file):
+                        mod.rename_folder_from_itinerary(
+                            folder=folder,
+                            apply=False,
+                            ratio=1.0,
+                            cluster_distance_m=1_000.0,
+                        )
+
+            # State should be written only once as "in-progress" (batch) and once as "completed",
+            # not once per cluster inference
+            state_writes = [s for s in call_sequence if s.startswith("state-write:")]
+            in_progress_writes = [s for s in state_writes if "in-progress" in s]
+            # With 2 clusters there should be at most 1 in-progress write (batch), not 2
+            self.assertLessEqual(len(in_progress_writes), 1,
+                f"Expected at most 1 batch in-progress state write, got {len(in_progress_writes)}")
 
 
 if __name__ == "__main__":
