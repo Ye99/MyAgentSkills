@@ -1732,3 +1732,98 @@ def test_process_folder_tree_prints_progress_to_stderr(capsys):
     assert "1/2" in captured.err
     assert "2/2" in captured.err
     assert "Complete" in captured.err
+
+
+# ── No-supported-media skip tests ────────────────────────────────
+
+
+class TestExtractMediaPointsEmptyStdout(unittest.TestCase):
+    """extract_media_points returns empty lists when exiftool finds no supported files."""
+
+    def test_returns_empty_on_empty_stdout(self) -> None:
+        """When exiftool stdout is empty (no matching extensions), return ([], [])."""
+        with patch(
+            "rename_folder_by_ai_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["exiftool"], returncode=0, stdout="", stderr="1 directories scanned\n0 image files read\n",
+            ),
+        ):
+            points, without_gps = mod.extract_media_points(Path("/tmp/day"))
+        self.assertEqual(points, [])
+        self.assertEqual(without_gps, [])
+
+    def test_returns_empty_on_whitespace_stdout(self) -> None:
+        """When exiftool stdout is whitespace-only, return ([], [])."""
+        with patch(
+            "rename_folder_by_ai_itinerary.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["exiftool"], returncode=0, stdout="  \n  ", stderr="",
+            ),
+        ):
+            points, without_gps = mod.extract_media_points(Path("/tmp/day"))
+        self.assertEqual(points, [])
+        self.assertEqual(without_gps, [])
+
+
+class TestSkippedNoSupportedMedia(unittest.TestCase):
+    """rename_folder_from_itinerary returns skipped-no-supported-media for empty extract."""
+
+    def test_skipped_status_when_no_media(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir) / "2025_08_01"
+            folder.mkdir()
+            # Only a .png file — extract_media_points returns ([], [])
+            (folder / "screenshot.png").write_text("fake")
+
+            with patch("rename_folder_by_ai_itinerary.extract_media_points", return_value=([], [])):
+                result = mod.rename_folder_from_itinerary(folder, apply=False, ratio=1.0)
+
+        self.assertEqual(result["status"], "skipped-no-supported-media")
+        self.assertEqual(result["media_with_gps_count"], 0)
+        self.assertEqual(result["media_without_gps_count"], 0)
+        self.assertFalse(result["used_reverse_geocoding"])
+        # No state/report files should be written for a lightweight skip
+        self.assertNotIn("state_file", result)
+        self.assertNotIn("report_file", result)
+
+
+def test_process_folder_tree_reports_skipped_no_supported_media(capsys):
+    """Tree run collects skipped-no-supported-media folders in summary and report."""
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        day_a = root / "2025" / "2025_08_01"
+        day_b = root / "2025" / "2025_08_02"
+        day_a.mkdir(parents=True)
+        day_b.mkdir(parents=True)
+
+        with patch(
+            "rename_folder_by_ai_itinerary.rename_folder_from_itinerary",
+            side_effect=[
+                {"folder_path": str(day_a), "status": "skipped-no-supported-media"},
+                {"folder_path": str(day_b), "status": "skipped-no-landmark"},
+            ],
+        ):
+            summary = mod.process_folder_tree(root, apply=False, ratio=0.01)
+
+        assert summary["total_folder_count"] == 2
+        assert summary["skipped_folder_count"] == 2
+        assert summary["failed_folder_count"] == 0
+        assert str(day_a) in summary["skipped_no_supported_media_folders"]
+        assert str(day_b) not in summary["skipped_no_supported_media_folders"]
+
+        # Verify tree report file also contains the list
+        report_path = Path(summary["tree_report_file"])
+        report = json.loads(report_path.read_text())
+        assert str(day_a) in report["skipped_no_supported_media_folders"]
+
+
+def test_progress_tracker_shows_no_supported_media_detail(capsys):
+    """ProgressTracker shows '(no supported media)' for skipped-no-supported-media."""
+    tracker = mod._ProgressTracker(total=1, apply=False, root="/tmp/test", ratio=1.0)
+    tracker.folder_done({
+        "folder_path": "/tmp/test/2025/2025_08_01",
+        "status": "skipped-no-supported-media",
+    })
+    captured = capsys.readouterr()
+    assert "no supported media" in captured.err
+    assert "no landmarks" not in captured.err
