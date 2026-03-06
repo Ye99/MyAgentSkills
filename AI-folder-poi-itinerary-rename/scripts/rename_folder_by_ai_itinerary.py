@@ -83,7 +83,10 @@ class _ProgressTracker:
         if cat in ("renamed", "planned") and target_name:
             detail = f"{source_name} -> {target_name}"
         elif cat == "skipped":
-            detail = f"{source_name} (no landmarks)"
+            if status == "skipped-no-supported-media":
+                detail = f"{source_name} (no supported media)"
+            else:
+                detail = f"{source_name} (no landmarks)"
         elif cat == "failed":
             err_msg = ""
             err = result.get("error")
@@ -501,6 +504,9 @@ def extract_media_points(folder: Path) -> tuple[list[MediaPoint], list[str]]:
         str(folder),
     ]
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    if not proc.stdout.strip():
+        # exiftool found no files matching the supported extensions — empty JSON.
+        return [], []
     records = json.loads(proc.stdout)
 
     points: list[MediaPoint] = []
@@ -1914,18 +1920,22 @@ def process_folder_tree(
         summary_status = "completed-with-failures"
 
     failed_folders: list[dict[str, Any]] = []
+    skipped_no_media_folders: list[str] = []
     for result in materialized_results:
         status = str(result.get("status") or "")
-        if not status.startswith("failed"):
-            continue
-        failed_folders.append(
-            {
-                "folder_path": result.get("folder_path"),
-                "status": status,
-                "state_file": result.get("state_file"),
-                "report_file": result.get("report_file"),
-            }
-        )
+        if status.startswith("failed"):
+            failed_folders.append(
+                {
+                    "folder_path": result.get("folder_path"),
+                    "status": status,
+                    "state_file": result.get("state_file"),
+                    "report_file": result.get("report_file"),
+                }
+            )
+        elif status == "skipped-no-supported-media":
+            folder_path = result.get("folder_path")
+            if isinstance(folder_path, str):
+                skipped_no_media_folders.append(folder_path)
 
     summary: dict[str, Any] = {
         "root_path": str(root),
@@ -1938,6 +1948,7 @@ def process_folder_tree(
         "other_folder_count": integrity_check["other_folder_count"],
         "integrity_check": integrity_check,
         "failed_folders": failed_folders,
+        "skipped_no_supported_media_folders": skipped_no_media_folders,
         "tree_state_file": str(default_tree_state_file(root)),
         "tree_report_file": str(default_tree_report_file(root)),
     }
@@ -1974,6 +1985,7 @@ def process_folder_tree(
             "target_folder_count_ok": integrity_check["target_folder_count_ok"],
         },
         "failed_folders": failed_folders,
+        "skipped_no_supported_media_folders": skipped_no_media_folders,
         "tree_state_file": str(default_tree_state_file(root)),
     }
     write_json_file(default_tree_report_file(root), tree_report_payload)
@@ -2165,6 +2177,19 @@ def rename_folder_from_itinerary(
             "state_file": str(state_file),
             "report_file": str(report_file),
             "error": error_payload,
+            "media_with_gps_count": 0,
+            "media_with_gps_sampled": 0,
+            "sample_ratio_requested": ratio,
+            "media_without_gps_count": 0,
+            "media_without_gps_examples": [],
+            "media_without_gps_ratio": 0.0,
+            "used_reverse_geocoding": False,
+        }
+    if not points and not without_gps:
+        # Folder has no supported media files (e.g. only .png screenshots).
+        return {
+            "folder_path": str(folder),
+            "status": "skipped-no-supported-media",
             "media_with_gps_count": 0,
             "media_with_gps_sampled": 0,
             "sample_ratio_requested": ratio,
