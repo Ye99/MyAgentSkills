@@ -10,11 +10,20 @@ from typing import Any
 from typing import cast
 from unittest.mock import patch
 
+import pytest
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rename_folder_by_ai_itinerary as mod
+
+M = mod
+
+
+@pytest.fixture(autouse=True)
+def set_home_gps_env(monkeypatch):
+    """Ensure HOME_GPS is set for all tests to prevent hard fail."""
+    monkeypatch.setenv("HOME_GPS", "0.001,0.001")
 
 
 class RenameFolderByAiItineraryTests(unittest.TestCase):
@@ -1187,6 +1196,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 state_file: Path,
                 report_file: Path,
                 resume: bool,
+                home_gps: tuple[float, float] = (0.0, 0.0),
             ) -> dict[str, object]:
                 _ = (
                     apply,
@@ -1202,6 +1212,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                     state_file,
                     report_file,
                     resume,
+                    home_gps,
                 )
                 seen_pool_ids.append(id(server_pool))
                 return {"folder_path": str(folder), "status": "planned-rename", "target_name": f"{folder.name}_A"}
@@ -1491,3 +1502,179 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── pytest-style tests for home-photo feature (Tasks 1–2) ──
+
+
+def test_extract_home_gps_valid(tmp_path, monkeypatch):
+    """extract_home_gps returns (lat, lon) from exiftool output."""
+    fake_json = json.dumps([{"SourceFile": "x.heic", "GPSLatitude": 47.694, "GPSLongitude": -122.101}])
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: type("R", (), {"stdout": fake_json})(),
+    )
+    lat, lon = M.extract_home_gps(tmp_path / "x.heic")
+    assert abs(lat - 47.694) < 1e-6
+    assert abs(lon - (-122.101)) < 1e-6
+
+
+def test_extract_home_gps_no_gps(tmp_path, monkeypatch):
+    """extract_home_gps raises SystemExit when photo has no GPS."""
+    fake_json = json.dumps([{"SourceFile": "x.heic"}])
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: type("R", (), {"stdout": fake_json})(),
+    )
+    with pytest.raises(SystemExit):
+        M.extract_home_gps(tmp_path / "x.heic")
+
+
+def test_extract_home_gps_zero_gps(tmp_path, monkeypatch):
+    """extract_home_gps rejects (0,0) GPS as invalid."""
+    fake_json = json.dumps([{"SourceFile": "x.heic", "GPSLatitude": 0.0, "GPSLongitude": 0.0}])
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: type("R", (), {"stdout": fake_json})(),
+    )
+    with pytest.raises(SystemExit):
+        M.extract_home_gps(tmp_path / "x.heic")
+
+
+def test_resolve_home_gps_from_env(monkeypatch):
+    """HOME_GPS env var takes priority."""
+    monkeypatch.setenv("HOME_GPS", "47.694,-122.101")
+    lat, lon = M.resolve_home_gps(home_photo=None)
+    assert abs(lat - 47.694) < 1e-6
+    assert abs(lon - (-122.101)) < 1e-6
+
+
+def test_resolve_home_gps_from_photo(tmp_path, monkeypatch):
+    """Falls back to --home-photo when HOME_GPS not set."""
+    monkeypatch.delenv("HOME_GPS", raising=False)
+    fake_json = json.dumps([{"SourceFile": "x.heic", "GPSLatitude": 47.694, "GPSLongitude": -122.101}])
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: type("R", (), {"stdout": fake_json})(),
+    )
+    lat, lon = M.resolve_home_gps(home_photo=tmp_path / "x.heic")
+    assert abs(lat - 47.694) < 1e-6
+
+
+def test_resolve_home_gps_neither_set(monkeypatch):
+    """Hard fail when neither HOME_GPS nor --home-photo is set."""
+    monkeypatch.delenv("HOME_GPS", raising=False)
+    with pytest.raises(SystemExit):
+        M.resolve_home_gps(home_photo=None)
+
+
+def test_resolve_home_gps_malformed_env(monkeypatch):
+    """Malformed HOME_GPS env var causes SystemExit."""
+    monkeypatch.setenv("HOME_GPS", "not-a-coordinate")
+    with pytest.raises(SystemExit):
+        M.resolve_home_gps(home_photo=None)
+
+
+def test_home_cluster_skips_inference(monkeypatch):
+    """Cluster within 200m of home gets Home landmark without full inference."""
+    home_gps = (47.694, -122.101)
+    cluster = M.LocationCluster(points=[
+        M.MediaPoint(source_file="a.jpg", lat=47.694, lon=-122.101,
+                     timestamp=datetime(2025, 7, 1, 10, 0)),
+    ])
+    pending = [(0, cluster)]
+    call_count = {"n": 0}
+    def fake_infer(*a, **kw):
+        call_count["n"] += 1
+        return {"landmark": "ShouldBeOverridden", "country": "UnitedStates"}
+    monkeypatch.setattr(M, "infer_landmark_info", fake_infer)
+    completed, failure, report = M.infer_pending_cluster_infos(
+        pending,
+        opencode_timeout_sec=10,
+        opencode_retries=1,
+        opencode_backoff_sec=0.1,
+        opencode_model=None,
+        inference_workers=1,
+        home_gps=home_gps,
+    )
+    assert len(completed) == 1
+    assert completed[0][2]["landmark"] == "Home"
+    assert completed[0][2]["country"] == "UnitedStates"
+    assert call_count["n"] == 1  # country inferred once
+
+
+def test_home_cluster_beyond_threshold_gets_normal_inference(monkeypatch):
+    """Cluster >200m from home gets normal inference."""
+    home_gps = (47.694, -122.101)
+    # ~5km away
+    cluster = M.LocationCluster(points=[
+        M.MediaPoint(source_file="a.jpg", lat=47.74, lon=-122.101,
+                     timestamp=datetime(2025, 7, 1, 10, 0)),
+    ])
+    pending = [(0, cluster)]
+    def fake_infer(*a, **kw):
+        return {"landmark": "SomePark", "country": "UnitedStates"}
+    monkeypatch.setattr(M, "infer_landmark_info", fake_infer)
+    completed, failure, report = M.infer_pending_cluster_infos(
+        pending,
+        opencode_timeout_sec=10,
+        opencode_retries=1,
+        opencode_backoff_sec=0.1,
+        opencode_model=None,
+        inference_workers=1,
+        home_gps=home_gps,
+    )
+    assert completed[0][2]["landmark"] == "SomePark"
+
+
+def test_home_country_inferred_once_for_multiple_clusters(monkeypatch):
+    """Multiple home clusters: country inferred once, reused for all."""
+    home_gps = (47.694, -122.101)
+    c1 = M.LocationCluster(points=[
+        M.MediaPoint(source_file="a.jpg", lat=47.694, lon=-122.101,
+                     timestamp=datetime(2025, 7, 1, 10, 0)),
+    ])
+    c2 = M.LocationCluster(points=[
+        M.MediaPoint(source_file="b.jpg", lat=47.6941, lon=-122.1008,
+                     timestamp=datetime(2025, 7, 1, 11, 0)),
+    ])
+    pending = [(0, c1), (1, c2)]
+    call_count = {"n": 0}
+    def fake_infer(*a, **kw):
+        call_count["n"] += 1
+        return {"landmark": "X", "country": "UnitedStates"}
+    monkeypatch.setattr(M, "infer_landmark_info", fake_infer)
+    completed, failure, report = M.infer_pending_cluster_infos(
+        pending,
+        opencode_timeout_sec=10,
+        opencode_retries=1,
+        opencode_backoff_sec=0.1,
+        opencode_model=None,
+        inference_workers=1,
+        home_gps=home_gps,
+    )
+    assert len(completed) == 2
+    assert all(c[2]["landmark"] == "Home" for c in completed)
+    assert all(c[2]["country"] == "UnitedStates" for c in completed)
+    assert call_count["n"] == 1  # only one inference call for country
+
+
+def test_home_landmark_in_folder_name():
+    """Home landmark appears in the final folder name via rank_landmarks_by_location_set_size."""
+    cluster_home = M.LocationCluster(points=[
+        M.MediaPoint("a.jpg", 47.694, -122.101, datetime(2025, 7, 1, 10)),
+    ])
+    cluster_pike = M.LocationCluster(points=[
+        M.MediaPoint("b.jpg", 47.6, -122.3, datetime(2025, 7, 1, 14)),
+    ])
+    cluster_infos = [
+        (cluster_home, {"landmark": "Home", "country": "UnitedStates"}),
+        (cluster_pike, {"landmark": "PikePlaceMarket", "country": "UnitedStates"}),
+    ]
+    landmarks = M.rank_landmarks_by_location_set_size(
+        reference_clusters=cluster_infos,
+        full_clusters=[cluster_home, cluster_pike],
+        max_landmarks=8,
+    )
+    assert "Home" in landmarks
+    assert "PikePlaceMarket" in landmarks
