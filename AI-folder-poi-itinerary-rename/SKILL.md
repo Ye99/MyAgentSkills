@@ -29,9 +29,9 @@ Rename day folders like `2025_07_24` to itinerary-ordered landmark names by scan
 6. Rename folder with comma-joined landmark tokens.
 7. If confidence is low, return `UnknownLandmark` and skip it from folder name.
 8. Cluster location sets using distance only (`--cluster-distance-m`), no time-gap rule.
-9. For merged multi-family/multi-continent same-day media, always split by inferred country and create multiple renamed day folders when multiple countries are detected.
-10. Do not suppress cross-continent labels; mixed-country same-day media is valid.
-11. Enforce `--max-landmarks` per resulting day folder (default `8`) and keep the most important landmarks by location set member count.
+9. For merged multi-family/multi-continent same-day media, keep a single renamed day folder; do not split by country.
+10. Keep mixed-country place names in one time-ordered itinerary; interleaving places is expected.
+11. For `ratio == 1.0` (ratio is constrained to `(0, 1]`), pre-trim sampled clusters to at most `--max-landmarks` (default `8`) before inference using largest location sets first (first-seen tie-break); if unique valid landmarks are still below cap, infer additional clusters as fallback. For `ratio < 1.0`, do not pre-trim before inference.
 12. Use exponential backoff retries for landmark inference; on exhausted retries, stop safely and write state/report files for resume.
 13. Record persistent landmark-inference failures in both files: report keeps summary, state keeps detailed failure log for troubleshooting and resume.
 14. Accept either a single day folder (`YYYY_MM_DD*`) or a tree root (for example `/Pictures`) and process all day folders under it.
@@ -80,18 +80,6 @@ Apply rename:
 python3 scripts/rename_folder_by_ai_itinerary.py "/path/to/2025_07_24" --apply
 ```
 
-Country-aware split for one day folder (dry-run):
-
-```bash
-python3 scripts/rename_folder_by_ai_itinerary.py "/path/to/2025_07_23" --ratio 0.05
-```
-
-Country-aware split and apply:
-
-```bash
-python3 scripts/rename_folder_by_ai_itinerary.py "/path/to/2025_07_23" --apply
-```
-
 Defaults:
 
 - `--ratio 1.0` (100% sampling, must be in `(0, 1]`)
@@ -106,7 +94,7 @@ Defaults:
 
 - Report folders renamed/planned/skipped.
 - Report files missing GPS separately.
-- In split/apply output, check `leftover_media_count` and `invalid_source_media_count` to confirm no unsafe external-source moves occurred.
+- Check `media_without_gps_count`, `media_without_gps_ratio`, and `media_without_gps_examples` for quick data-quality visibility and concrete file examples.
 - Confirm `used_reverse_geocoding` is `false` in output.
 - For tree runs, check `.ai-itinerary-tree-report.json` (summary) and `.ai-itinerary-tree-state.json` (detailed per-folder log).
 - Confirm integrity check fields show `passed: true`, `math_logic_ok: true`, and `target_folder_count_ok: true` for apply runs.
