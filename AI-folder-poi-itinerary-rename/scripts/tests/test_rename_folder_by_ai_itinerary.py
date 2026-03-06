@@ -1678,3 +1678,57 @@ def test_home_landmark_in_folder_name():
     )
     assert "Home" in landmarks
     assert "PikePlaceMarket" in landmarks
+
+
+def test_progress_tracker_reports_to_stderr(capsys):
+    """ProgressTracker prints per-folder lines and periodic summaries to stderr."""
+    tracker = mod._ProgressTracker(total=3, apply=True, root="/tmp/test", ratio=0.05)
+    tracker.folder_done({
+        "folder_path": "/tmp/test/2025/2025_01_01",
+        "status": "renamed",
+        "target_name": "2025_01_01_Home",
+    })
+    tracker.folder_done({
+        "folder_path": "/tmp/test/2025/2025_01_02",
+        "status": "skipped-no-landmark",
+    })
+    tracker.folder_done({
+        "folder_path": "/tmp/test/2025/2025_01_03",
+        "status": "failed-inference",
+        "error": {"message": "timeout"},
+    })
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "1/3" in captured.err
+    assert "2/3" in captured.err
+    assert "3/3" in captured.err
+    assert "renamed" in captured.err
+    assert "skipped" in captured.err
+    assert "failed" in captured.err
+    assert "done" in captured.err.lower() or "Complete" in captured.err
+
+
+def test_process_folder_tree_prints_progress_to_stderr(capsys):
+    """process_folder_tree emits per-folder progress and summary to stderr."""
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        day_a = root / "2025" / "2025_07_22"
+        day_b = root / "2025" / "2025_07_23"
+        day_a.mkdir(parents=True)
+        day_b.mkdir(parents=True)
+
+        with patch(
+            "rename_folder_by_ai_itinerary.rename_folder_from_itinerary",
+            side_effect=[
+                {"folder_path": str(day_a), "status": "planned-rename", "target_name": "2025_07_22_A"},
+                {"folder_path": str(day_b), "status": "skipped-no-landmark"},
+            ],
+        ):
+            mod.process_folder_tree(root, apply=False, ratio=0.01)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Processing 2 day folders" in captured.err
+    assert "1/2" in captured.err
+    assert "2/2" in captured.err
+    assert "Complete" in captured.err

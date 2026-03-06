@@ -18,6 +18,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 import time
@@ -35,6 +36,121 @@ DAY_FOLDER_EXACT_RE = re.compile(r"^\d{4}_\d{2}_\d{2}$")
 UNKNOWN_LANDMARK = "UnknownLandmark"
 _HOME_DISTANCE_M = 200.0
 HOME_LANDMARK = "Home"
+
+
+class _ProgressTracker:
+    """Thread-safe progress reporter for tree processing.  All output to stderr."""
+
+    _SUMMARY_INTERVAL = 10
+
+    def __init__(self, total: int, apply: bool, root: str, ratio: float) -> None:
+        self._total = total
+        self._apply = apply
+        self._root = root
+        self._ratio = ratio
+        self._lock = threading.RLock()
+        self._completed = 0
+        self._renamed = 0
+        self._planned = 0
+        self._skipped = 0
+        self._failed = 0
+        self._home = 0
+        self._start = time.perf_counter()
+
+    def folder_done(self, result: dict[str, Any]) -> None:
+        status = str(result.get("status") or "")
+        folder_path = str(result.get("folder_path") or "")
+        source_name = Path(folder_path).name if folder_path else "?"
+        target_name = result.get("target_name") or ""
+        cat = _status_category(status)
+
+        with self._lock:
+            self._completed += 1
+            if cat == "renamed":
+                self._renamed += 1
+            elif cat == "planned":
+                self._planned += 1
+            elif cat == "skipped":
+                self._skipped += 1
+            elif cat == "failed":
+                self._failed += 1
+            if isinstance(target_name, str) and HOME_LANDMARK in target_name:
+                self._home += 1
+            completed = self._completed
+            total = self._total
+
+        detail = ""
+        if cat in ("renamed", "planned") and target_name:
+            detail = f"{source_name} -> {target_name}"
+        elif cat == "skipped":
+            detail = f"{source_name} (no landmarks)"
+        elif cat == "failed":
+            err_msg = ""
+            err = result.get("error")
+            if isinstance(err, dict):
+                err_msg = str(err.get("message") or "")[:60]
+            detail = f"{source_name} ({err_msg})" if err_msg else source_name
+        else:
+            detail = source_name
+
+        elapsed_total = time.perf_counter() - self._start
+        print(
+            f"[{completed:>{len(str(total))}}/{total}] {elapsed_total:6.1f}s  {cat:<8s}  {detail}",
+            file=sys.stderr,
+        )
+
+        if completed % self._SUMMARY_INTERVAL == 0 or completed == total:
+            self._print_summary(completed, total, elapsed_total)
+
+    def _print_summary(self, completed: int, total: int, elapsed: float) -> None:
+        rate = completed / elapsed * 60.0 if elapsed > 0 else 0
+        rate_per_sec = completed / elapsed if elapsed > 0 else 0
+        remaining = total - completed
+        eta_sec = remaining / rate_per_sec if rate_per_sec > 0 else 0
+        eta_str = self._fmt_duration(eta_sec) if remaining > 0 else "0s"
+        elapsed_str = self._fmt_duration(elapsed)
+
+        with self._lock:
+            parts = [
+                f"--- {completed}/{total} done",
+                f"elapsed {elapsed_str}",
+                f"{rate:.1f} folders/min" if rate >= 1 else f"{rate:.2f} folders/min",
+                f"ETA ~{eta_str}",
+                f"renamed:{self._renamed}",
+                f"skipped:{self._skipped}",
+                f"failed:{self._failed}",
+                f"home:{self._home}",
+            ]
+        print(" | ".join(parts), file=sys.stderr)
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h}h{m:02d}m{s:02d}s"
+        if m > 0:
+            return f"{m}m{s:02d}s"
+        return f"{s}s"
+
+    def print_start(self) -> None:
+        mode = "apply" if self._apply else "dry-run"
+        print(
+            f"Processing {self._total} day folders in {self._root} ({mode}, ratio={self._ratio}) ...",
+            file=sys.stderr,
+        )
+
+    def print_completion(self, integrity_passed: bool) -> None:
+        elapsed_str = self._fmt_duration(time.perf_counter() - self._start)
+        status = "passed" if integrity_passed else "FAILED"
+        with self._lock:
+            print(
+                f"=== Complete: {self._total} folders in {elapsed_str}"
+                f" | renamed:{self._renamed} planned:{self._planned}"
+                f" skipped:{self._skipped} failed:{self._failed}"
+                f" | integrity: {status}",
+                file=sys.stderr,
+            )
 
 
 class InferenceExhaustedError(RuntimeError):
@@ -1679,6 +1795,10 @@ def process_folder_tree(
 ) -> dict[str, Any]:
     day_folders = discover_day_folders(root)
     folder_results: list[dict[str, Any] | None] = [None] * len(day_folders)
+    progress = _ProgressTracker(
+        total=len(day_folders), apply=apply, root=str(root), ratio=ratio,
+    )
+    progress.print_start()
     shared_server_pool: list[OpencodeServerHandle] | None = None
     inference_scheduler: SharedInferenceScheduler | None = None
 
@@ -1767,10 +1887,12 @@ def process_folder_tree(
                 for future in as_completed(future_map):
                     idx, result = future.result()
                     folder_results[idx] = result
+                    progress.folder_done(result)
         else:
             for idx, folder in enumerate(day_folders):
                 _idx, result = run_folder(idx, folder)
                 folder_results[_idx] = result
+                progress.folder_done(result)
     except KeyboardInterrupt:
         cancelled = True
         raise
@@ -1783,6 +1905,7 @@ def process_folder_tree(
     materialized_results: list[dict[str, Any]] = [result for result in folder_results if isinstance(result, dict)]
 
     integrity_check = verify_tree_integrity(materialized_results, apply=apply)
+    progress.print_completion(integrity_check["passed"])
 
     summary_status = "completed"
     if not integrity_check["passed"]:
