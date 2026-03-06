@@ -33,6 +33,8 @@ from typing import Any
 DATE_PREFIX_RE = re.compile(r"^(\d{4}_\d{2}_\d{2})")
 DAY_FOLDER_EXACT_RE = re.compile(r"^\d{4}_\d{2}_\d{2}$")
 UNKNOWN_LANDMARK = "UnknownLandmark"
+_HOME_DISTANCE_M = 200.0
+HOME_LANDMARK = "Home"
 
 
 class InferenceExhaustedError(RuntimeError):
@@ -310,6 +312,49 @@ def _extract_timestamp(record: dict[str, object]) -> datetime | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def extract_home_gps(photo_path: Path) -> tuple[float, float]:
+    """Extract GPS lat/lon from a single photo using exiftool."""
+    cmd = [
+        "exiftool", "-j", "-n",
+        "-GPSLatitude", "-GPSLongitude",
+        str(photo_path),
+    ]
+    proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    records = json.loads(proc.stdout)
+    if not records or not isinstance(records[0], dict):
+        raise SystemExit(f"exiftool returned no data for {photo_path}")
+    rec = records[0]
+    lat = rec.get("GPSLatitude")
+    lon = rec.get("GPSLongitude")
+    if not isinstance(lat, (float, int)) or not isinstance(lon, (float, int)):
+        raise SystemExit(f"No GPS coordinates in {photo_path}")
+    if float(lat) == 0.0 and float(lon) == 0.0:
+        raise SystemExit(f"GPS is (0,0) in {photo_path} — likely invalid")
+    return float(lat), float(lon)
+
+
+def resolve_home_gps(home_photo: Path | None = None) -> tuple[float, float]:
+    """Resolve home GPS: HOME_GPS env var (priority), then --home-photo, else hard fail."""
+    env_val = os.environ.get("HOME_GPS")
+    if env_val:
+        parts = env_val.split(",")
+        if len(parts) != 2:
+            raise SystemExit(f"HOME_GPS must be 'lat,lon', got: {env_val!r}")
+        try:
+            lat, lon = float(parts[0].strip()), float(parts[1].strip())
+        except ValueError:
+            raise SystemExit(f"HOME_GPS must be 'lat,lon' with valid floats, got: {env_val!r}")
+        if lat == 0.0 and lon == 0.0:
+            raise SystemExit("HOME_GPS is (0,0) — likely invalid")
+        return lat, lon
+    if home_photo is not None:
+        return extract_home_gps(home_photo)
+    raise SystemExit(
+        "Error: HOME_GPS environment variable or --home-photo argument required.\n"
+        "Set HOME_GPS=lat,lon or pass --home-photo <path>."
+    )
 
 
 def extract_media_points(folder: Path) -> tuple[list[MediaPoint], list[str]]:
@@ -1011,6 +1056,7 @@ def infer_pending_cluster_infos(
     inference_workers: int,
     server_pool: list[OpencodeServerHandle] | None = None,
     inference_scheduler: SharedInferenceScheduler | None = None,
+    home_gps: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[
     list[tuple[int, LocationCluster, dict[str, str]]],
     tuple[int, LocationCluster, InferenceExhaustedError] | None,
@@ -1033,6 +1079,38 @@ def infer_pending_cluster_infos(
 
     if not pending_clusters:
         return completed, None, worker_report
+
+    # Pre-filter home clusters
+    home_lat, home_lon = home_gps
+    if home_lat != 0.0 or home_lon != 0.0:
+        home_country: str | None = None
+        remaining: list[tuple[int, LocationCluster]] = []
+        for idx, cluster in pending_clusters:
+            c_lat, c_lon = cluster.centroid
+            if haversine_m(c_lat, c_lon, home_lat, home_lon) <= _HOME_DISTANCE_M:
+                if home_country is None:
+                    # Infer country once for the first home cluster
+                    try:
+                        info = infer_landmark_info(
+                            c_lat, c_lon,
+                            start_time=cluster.start_time,
+                            end_time=cluster.end_time,
+                            sample_count=len(cluster.points),
+                            opencode_timeout_sec=opencode_timeout_sec,
+                            opencode_retries=opencode_retries,
+                            opencode_backoff_sec=opencode_backoff_sec,
+                            opencode_model=opencode_model,
+                        )
+                        home_country = info.get("country", "")
+                    except InferenceExhaustedError:
+                        home_country = ""
+                home_info = {"landmark": HOME_LANDMARK, "country": home_country}
+                completed.append((idx, cluster, home_info))
+            else:
+                remaining.append((idx, cluster))
+        pending_clusters = remaining
+        if not pending_clusters:
+            return completed, None, worker_report
 
     if inference_scheduler is not None:
         ordered_pending = sorted(pending_clusters, key=lambda item: item[0])
@@ -1597,6 +1675,7 @@ def process_folder_tree(
     opencode_model: str | None = None,
     inference_workers: int = 3,
     resume: bool = True,
+    home_gps: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
     day_folders = discover_day_folders(root)
     folder_results: list[dict[str, Any] | None] = [None] * len(day_folders)
@@ -1645,6 +1724,7 @@ def process_folder_tree(
                 state_file=default_state_file(folder),
                 report_file=default_report_file(folder),
                 resume=resume,
+                home_gps=home_gps,
             )
         except Exception as exc:  # noqa: BLE001
             write_json_file(
@@ -1908,6 +1988,7 @@ def rename_folder_from_itinerary(
     state_file: Path | None = None,
     report_file: Path | None = None,
     resume: bool = True,
+    home_gps: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, object]:
     date_prefix = _date_prefix_from_folder(folder)
     if state_file is None:
@@ -2021,6 +2102,7 @@ def rename_folder_from_itinerary(
         inference_workers=inference_workers,
         server_pool=server_pool,
         inference_scheduler=inference_scheduler,
+        home_gps=home_gps,
     )
 
     for idx, cluster, info in completed_pending_infos:
@@ -2367,6 +2449,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("OPENCODE_MODEL"),
         help="Model passed to opencode -m (defaults to OPENCODE_MODEL)",
     )
+    parser.add_argument(
+        "--home-photo",
+        help="Path to a photo taken at home; GPS extracted via exiftool. "
+             "Overridden by HOME_GPS env var if set.",
+    )
     return parser
 
 
@@ -2377,6 +2464,9 @@ def main() -> int:
     folder = Path(args.folder).expanduser().resolve()
     if not folder.exists() or not folder.is_dir():
         parser.error("folder must exist and be a directory")
+
+    home_photo_path = Path(args.home_photo).expanduser().resolve() if args.home_photo else None
+    home_gps = resolve_home_gps(home_photo=home_photo_path)
 
     has_day_children = any(
         child.is_dir() and DAY_FOLDER_EXACT_RE.match(child.name)
@@ -2397,6 +2487,7 @@ def main() -> int:
             state_file=Path(args.state_file).expanduser().resolve() if args.state_file else None,
             report_file=Path(args.report_file).expanduser().resolve() if args.report_file else None,
             resume=not args.no_resume,
+            home_gps=home_gps,
         )
     else:
         if args.state_file or args.report_file:
@@ -2413,6 +2504,7 @@ def main() -> int:
             opencode_model=args.opencode_model,
             inference_workers=args.inference_workers,
             resume=not args.no_resume,
+            home_gps=home_gps,
         )
     print(json.dumps(result, ensure_ascii=True, indent=2))
     return 0
