@@ -30,7 +30,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 4. If EXIF datetime is naive and GPS UTC tags exist, use GPS UTC + offline timezone conversion.
 5. If EXIF datetime is naive and GPS UTC tags do not exist, keep EXIF datetime as local-naive.
 6. Copy media without metadata rewrite (high-fidelity copy), never move/delete source.
-7. Collision policy: deterministic suffix `_dup001`, `_dup002`, ...
+7. Collision policy: deterministic suffix `_col001`, `_col002`, ... (name collision, different content)
 8. Do not hardcode media extensions. Classify via metadata MIME/FileType.
 9. Unknown signatures are cached; unresolved unknown signatures default to media-candidate to avoid loss.
 10. Explicit non-media exclusions (never copied, never signature-looked-up):
@@ -40,6 +40,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
    - `*.sav`
    - `*.db`
    - `*.log`
+   - `*.txt` (ffprobe falsely classifies plain text as `tty/ansi video`)
 
 ## Dependencies
 
@@ -67,6 +68,20 @@ Optional:
 - `--signature-cache <path>`
 - `--workers <n>`
 - `--verbose`
+
+## Running the Script — No Timeouts
+
+**Do NOT use a fixed timeout when running this script.** The script emits deterministic progress to stderr:
+
+```
+[progress] processing 96 entries...
+[progress] 1/96 (1%)
+[progress] 2/96 (2%)
+...
+[progress] 96/96 (100%)
+```
+
+Use the progress line to know the script is alive and to estimate completion. Let the process run until it exits naturally. A timeout will kill an otherwise healthy run mid-copy and leave the destination in a partial state.
 
 ## Unknown Signature Workflow (Auto + AI Fallback)
 
