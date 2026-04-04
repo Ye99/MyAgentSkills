@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -12,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,16 +34,7 @@ MAC_METADATA_DIRS = {
 }
 MAC_METADATA_FILES = {".DS_Store", ".metadata_never_index", "Icon\r", ".VolumeIcon.icns"}
 MAC_METADATA_PREFIXES = ("._",)
-EXCLUDED_NON_MEDIA_EXTENSIONS = {".url", ".ini", ".bk", ".sav", ".db", ".log"}
-
-
-@dataclass
-class PlannedCopy:
-    source_path: Path
-    destination_path: Path
-    timestamp_source: str
-    timezone_name: str | None
-    classification_reason: str
+EXCLUDED_NON_MEDIA_EXTENSIONS = {".url", ".ini", ".bk", ".sav", ".db", ".log", ".txt"}
 
 
 def signature_key(mime_type: str | None, file_type: str | None, extension: str | None) -> str:
@@ -140,10 +129,7 @@ def is_system_metadata_path(path: Path) -> bool:
 
 
 def is_explicit_non_media_path(path: Path) -> bool:
-    extension = path.suffix.casefold()
-    if extension in EXCLUDED_NON_MEDIA_EXTENSIONS:
-        return True
-    return False
+    return path.suffix.casefold() in EXCLUDED_NON_MEDIA_EXTENSIONS
 
 
 def parse_exif_datetime(value: str | None, offset: str | None = None) -> datetime | None:
@@ -169,14 +155,12 @@ def parse_exif_datetime(value: str | None, offset: str | None = None) -> datetim
         return None
 
     if parsed.tzinfo is None and offset:
-        for tz_fmt in ["%z", "%z"]:
-            try:
-                tz_part = datetime.strptime(offset.strip(), tz_fmt).tzinfo
-                if tz_part is not None:
-                    parsed = parsed.replace(tzinfo=tz_part)
-                    break
-            except ValueError:
-                continue
+        try:
+            tz_part = datetime.strptime(offset.strip(), "%z").tzinfo
+            if tz_part is not None:
+                parsed = parsed.replace(tzinfo=tz_part)
+        except ValueError:
+            pass
     return parsed
 
 
@@ -261,24 +245,23 @@ def resolve_capture_datetime(
     return mtime_dt, "file-mtime", None
 
 
-def _file_content_hash(path: Path, block_size: int = 1024 * 1024) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as fh:
-        while True:
-            chunk = fh.read(block_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _files_are_identical(a: Path, b: Path) -> bool:
+def _files_are_identical(a: Path, b: Path, block_size: int = 1024 * 1024) -> bool:
     try:
         if a.stat().st_size != b.stat().st_size:
             return False
     except OSError:
         return False
-    return _file_content_hash(a) == _file_content_hash(b)
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                chunk_a = fa.read(block_size)
+                chunk_b = fb.read(block_size)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
 
 
 def next_collision_path(
@@ -299,7 +282,7 @@ def next_collision_path(
     parent = path.parent
     idx = 1
     while True:
-        candidate = parent / f"{stem}_dup{idx:03d}{suffix}"
+        candidate = parent / f"{stem}_col{idx:03d}{suffix}"
         if candidate not in existing_paths and not candidate.exists():
             existing_paths.add(candidate)
             return candidate
@@ -381,11 +364,12 @@ def _extract_metadata_records(source_root: Path) -> list[dict[str, Any]]:
     ]
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError as exc:
         raise RuntimeError("exiftool is required but not installed") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"exiftool failed: {exc.stderr.strip()}") from exc
+    # exit code 1 = minor errors (e.g. non-image files present); stdout still contains valid JSON
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"exiftool failed (exit {result.returncode}): {result.stderr.strip()}")
 
     try:
         payload = json.loads(result.stdout)
@@ -548,6 +532,11 @@ def build_report(
     report_path.write_text(json.dumps(report, indent=2) + "\n")
 
 
+def _emit_progress(done: int, total: int, *, file=sys.stderr) -> None:
+    pct = int(done * 100 / total) if total else 100
+    print(f"\r[progress] {done}/{total} ({pct}%)", end="", flush=True, file=file)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Organize media by local capture date into %Y/%Y_%m_%d folders"
@@ -591,7 +580,10 @@ def main() -> int:
     media_sources: list[Path] = []
     existing_destinations: set[Path] = set()
 
-    for record in records:
+    total_records = len(records)
+    print(f"[progress] processing {total_records} entries...", file=sys.stderr)
+    for record_idx, record in enumerate(records, 1):
+        _emit_progress(record_idx, total_records)
         source_path = Path(str(record.get("SourceFile") or "")).resolve()
         if not source_path.exists() or not source_path.is_file():
             continue
@@ -703,6 +695,8 @@ def main() -> int:
                     "error": str(exc),
                 }
             )
+
+    print(file=sys.stderr)  # newline after progress line
 
     missed_media: list[str] = []
 

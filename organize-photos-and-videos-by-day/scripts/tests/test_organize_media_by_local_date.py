@@ -116,12 +116,12 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
     def test_next_collision_path_uses_incrementing_suffix(self) -> None:
         existing = {
             Path("/tmp/2024/2024_09_18/IMG_0001.JPG"),
-            Path("/tmp/2024/2024_09_18/IMG_0001_dup001.JPG"),
+            Path("/tmp/2024/2024_09_18/IMG_0001_col001.JPG"),
         }
 
         resolved = mod.next_collision_path(Path("/tmp/2024/2024_09_18/IMG_0001.JPG"), existing)
 
-        self.assertEqual(resolved, Path("/tmp/2024/2024_09_18/IMG_0001_dup002.JPG"))
+        self.assertEqual(resolved, Path("/tmp/2024/2024_09_18/IMG_0001_col002.JPG"))
 
     def test_load_find_missing_module_imports_without_dataclass_error(self) -> None:
         repo_root = Path(__file__).resolve().parents[3]
@@ -159,6 +159,40 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/anything.db")))
         self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/anything.log")))
         self.assertFalse(mod.is_explicit_non_media_path(Path("/mnt/foo/IMG_0001.MOV")))
+
+    def test_is_explicit_non_media_path_rejects_txt_files(self) -> None:
+        # .txt files like GoProTrashList.txt are not media; ffprobe falsely classifies
+        # plain text as tty/ansi video so we must exclude by extension before lookup.
+        self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/GoProTrashList.txt")))
+        self.assertTrue(mod.is_explicit_non_media_path(Path("/mnt/foo/README.txt")))
+
+    def test_extract_metadata_records_tolerates_exiftool_exit_code_1(self) -> None:
+        # exiftool exits with code 1 (minor error) when it encounters non-image files
+        # mixed in with media files. This is normal and should not raise an exception.
+        valid_json = '[{"SourceFile": "/tmp/photo.jpg", "MIMEType": "image/jpeg"}]'
+        completed = mock.Mock(returncode=1, stdout=valid_json, stderr="1 directories scanned\n1 image files read")
+
+        with mock.patch.object(mod.subprocess, "run", return_value=completed):
+            records = mod._extract_metadata_records(Path("/tmp"))
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["SourceFile"], "/tmp/photo.jpg")
+
+    def test_emit_progress_writes_count_and_percentage_to_stream(self) -> None:
+        import io
+        out = io.StringIO()
+        mod._emit_progress(10, 84, file=out)
+        text = out.getvalue()
+        self.assertIn("10", text)
+        self.assertIn("84", text)
+        self.assertIn("11%", text)  # floor(10/84*100) == 11
+
+    def test_emit_progress_writes_100_percent_when_done(self) -> None:
+        import io
+        out = io.StringIO()
+        mod._emit_progress(84, 84, file=out)
+        text = out.getvalue()
+        self.assertIn("100%", text)
 
 
 class IdempotentCopyTests(unittest.TestCase):
@@ -201,7 +235,7 @@ class IdempotentCopyTests(unittest.TestCase):
             )
             self.assertIsNone(result)
 
-    def test_next_collision_path_returns_dup_when_different_file_exists(self) -> None:
+    def test_next_collision_path_returns_col_when_different_file_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "source" / "photo.jpg"
             dst_dir = Path(tmp) / "dest" / "2024" / "2024_01_01"
@@ -215,9 +249,9 @@ class IdempotentCopyTests(unittest.TestCase):
                 dst_dir / "photo.jpg", existing_paths, source_path=src
             )
             self.assertIsNotNone(result)
-            self.assertEqual(result.name, "photo_dup001.jpg")
+            self.assertEqual(result.name, "photo_col001.jpg")
 
-    def test_next_collision_path_skips_dup_when_identical_dup_exists(self) -> None:
+    def test_next_collision_path_skips_col_when_identical_col_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "source" / "photo.jpg"
             dst_dir = Path(tmp) / "dest" / "2024" / "2024_01_01"
@@ -225,7 +259,7 @@ class IdempotentCopyTests(unittest.TestCase):
             dst_dir.mkdir(parents=True)
             src.write_bytes(b"photo-data-xyz")
             (dst_dir / "photo.jpg").write_bytes(b"other-photo")
-            (dst_dir / "photo_dup001.jpg").write_bytes(b"photo-data-xyz")
+            (dst_dir / "photo_col001.jpg").write_bytes(b"photo-data-xyz")
 
             existing_paths: set[Path] = set()
             result = mod.next_collision_path(
