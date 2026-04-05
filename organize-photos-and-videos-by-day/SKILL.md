@@ -78,7 +78,7 @@ Optional:
 
 ## Running the Script — No Timeouts
 
-**Do NOT use a fixed timeout when running this script.** The script emits deterministic progress to stderr:
+**Do NOT use a fixed timeout when running this script.** The script emits deterministic progress to stderr during the main scan/copy loop:
 
 ```
 [progress] processing 96 entries...
@@ -88,7 +88,26 @@ Optional:
 [progress] 96/96 (100%)
 ```
 
-Use the progress line to know the script is alive and to estimate completion. Let the process run until it exits naturally. A timeout will kill an otherwise healthy run mid-copy and leave the destination in a partial state.
+After the main loop reaches `100%`, the script may enter longer end phases such as verification, report writing, and cache saving. Those phases now emit explicit status lines:
+
+```
+[phase] verification started
+[phase] verification: preparing shadow tree
+[phase] verification: building destination index
+[phase] verification: hashing destination files
+[phase] verification: comparing source files
+[phase] verification complete
+[phase] writing report
+[phase] saving signature cache
+[done] report written: /path/to/report.json
+```
+
+Agent monitoring rule:
+- `100%` on the entry counter is **not** the terminal signal.
+- `[phase] ...` lines indicate post-loop work is still active.
+- Treat `[done] report written: ...` plus process exit as the true completion signal.
+
+Use the progress and phase lines to know the script is alive and to estimate completion. Let the process run until it exits naturally. A timeout will kill an otherwise healthy run mid-copy or mid-verification and can leave the destination/report state ambiguous.
 
 ## Unknown Signature Workflow (Auto + AI Fallback)
 

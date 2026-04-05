@@ -301,6 +301,55 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("100%", text)
 
+    def test_emit_phase_writes_named_phase_line(self) -> None:
+        import io
+        out = io.StringIO()
+        mod._emit_phase("verification started", file=out)
+        self.assertEqual(out.getvalue(), "[phase] verification started\n")
+
+    def test_emit_done_writes_report_written_signal(self) -> None:
+        import io
+        out = io.StringIO()
+        mod._emit_done(Path("/tmp/report.json"), file=out)
+        self.assertEqual(out.getvalue(), "[done] report written: /tmp/report.json\n")
+
+    def test_verify_with_find_missing_emits_phase_signals(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.normalized_extensions.return_value = ()
+        fake_module.build_dest_index.return_value = {1: [Path("/tmp/dest.bin")]}
+        fake_module.build_dest_hash_sets.return_value = {1: {"abc"}}
+        fake_module.find_missing_files.return_value = []
+
+        phase_messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.jpg"
+            destination_root = Path(tmp) / "dest"
+            destination_root.mkdir()
+            source_path.write_bytes(b"x")
+
+            with mock.patch.object(mod, "_load_find_missing_module", return_value=fake_module):
+                missing = mod.verify_with_find_missing(
+                    media_source_paths=[source_path],
+                    destination_root=destination_root,
+                    workers=1,
+                    verbose=False,
+                    phase_callback=phase_messages.append,
+                )
+
+        self.assertEqual(missing, [])
+        self.assertEqual(
+            phase_messages,
+            [
+                "verification started",
+                "verification: preparing shadow tree",
+                "verification: building destination index",
+                "verification: hashing destination files",
+                "verification: comparing source files",
+                "verification complete",
+            ],
+        )
+
 
 class IdempotentCopyTests(unittest.TestCase):
     def test_files_are_identical_returns_true_for_same_content(self) -> None:

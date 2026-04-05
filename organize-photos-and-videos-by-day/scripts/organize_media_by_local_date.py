@@ -492,16 +492,22 @@ def verify_with_find_missing(
     destination_root: Path,
     workers: int,
     verbose: bool,
+    phase_callback: Callable[[str], None] | None = None,
 ) -> list[str]:
     repo_root = Path(__file__).resolve().parents[2]
     module = _load_find_missing_module(repo_root)
     if module is None:
         return []
 
+    if phase_callback is not None:
+        phase_callback("verification started")
+
     with tempfile.TemporaryDirectory(prefix="media-verify-") as tmp_dir:
         shadow_root = Path(tmp_dir)
         rel_to_source: dict[str, str] = {}
 
+        if phase_callback is not None:
+            phase_callback("verification: preparing shadow tree")
         for index, source_path in enumerate(media_source_paths):
             rel_name = f"{index:09d}_{source_path.name}"
             shadow_path = shadow_root / rel_name
@@ -512,8 +518,14 @@ def verify_with_find_missing(
             rel_to_source[rel_name] = str(source_path)
 
         skip_extensions = module.normalized_extensions(())
+        if phase_callback is not None:
+            phase_callback("verification: building destination index")
         dest_index = module.build_dest_index(destination_root, (), skip_extensions, verbose)
+        if phase_callback is not None:
+            phase_callback("verification: hashing destination files")
         dest_hash_sets = module.build_dest_hash_sets(dest_index, 1024 * 1024, workers, verbose)
+        if phase_callback is not None:
+            phase_callback("verification: comparing source files")
         missing_rel = module.find_missing_files(
             shadow_root,
             dest_hash_sets,
@@ -523,6 +535,8 @@ def verify_with_find_missing(
             workers,
             verbose,
         )
+        if phase_callback is not None:
+            phase_callback("verification complete")
         return [rel_to_source.get(rel, rel) for rel in missing_rel]
 
 
@@ -566,6 +580,14 @@ def build_report(
 def _emit_progress(done: int, total: int, *, file=sys.stderr) -> None:
     pct = int(done * 100 / total) if total else 100
     print(f"\r[progress] {done}/{total} ({pct}%)", end="", flush=True, file=file)
+
+
+def _emit_phase(message: str, *, file=sys.stderr) -> None:
+    print(f"[phase] {message}", flush=True, file=file)
+
+
+def _emit_done(report_path: Path, *, file=sys.stdout) -> None:
+    print(f"[done] report written: {report_path}", flush=True, file=file)
 
 
 def main() -> int:
@@ -767,6 +789,7 @@ def main() -> int:
             destination_root=destination_root,
             workers=max(1, args.workers),
             verbose=args.verbose,
+            phase_callback=_emit_phase,
         )
         for source_path in missing_by_hash:
             if source_path not in missed_media:
@@ -777,6 +800,7 @@ def main() -> int:
         if source_path not in missed_media:
             missed_media.append(source_path)
 
+    _emit_phase("writing report")
     build_report(
         source_root=source_root,
         destination_root=destination_root,
@@ -789,6 +813,7 @@ def main() -> int:
         report_path=report_path,
     )
 
+    _emit_phase("saving signature cache")
     _save_signature_cache(cache_path, signature_cache)
 
     skipped_count = sum(1 for entry in copied if entry.get("status") == "skipped-already-exists")
@@ -802,6 +827,7 @@ def main() -> int:
     print(f"Missed media: {len(missed_media)}")
     print(f"Non-media not copied: {len(non_media_not_copied)}")
     print(f"Unknown signatures still needing AI lookup: {len(unknown_signatures)}")
+    _emit_done(report_path)
 
     if args.apply and missed_media:
         print("Verification failed: missed media detected. See report for details.", file=sys.stderr)
