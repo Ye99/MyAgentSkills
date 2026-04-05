@@ -48,6 +48,20 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         self.assertEqual(reason, "cache:non_media")
         self.assertFalse(needs_lookup)
 
+    def test_classify_cache_does_not_suppress_lookup_for_all_unknowns_key(self) -> None:
+        # The key unknown|unknown|unknown is too broad to trust from cache.
+        # Even if cached as "media", needs_lookup must remain True so ffprobe
+        # can verify on a per-file basis.
+        key = "unknown|unknown|unknown"
+        is_media, reason, needs_lookup = mod.classify_media_signature(
+            mime_type=None,
+            file_type=None,
+            extension="",
+            cache={key: "media"},
+        )
+
+        self.assertTrue(needs_lookup)
+
     def test_auto_triage_unknown_signature_marks_media_on_video_stream(self) -> None:
         ffprobe_payload = '{"streams":[{"codec_type":"video"}]}'
         completed = mock.Mock(returncode=0, stdout=ffprobe_payload, stderr="")

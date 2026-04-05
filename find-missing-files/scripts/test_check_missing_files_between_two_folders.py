@@ -53,10 +53,10 @@ def test_build_dest_index_handles_stat_error(monkeypatch, tmp_path, capsys):
     write_file(dest / 'bad.bin', b'xxx')
     original_stat = Path.stat
 
-    def fake_stat(self):
+    def fake_stat(self, **kwargs):
         if self.name == 'bad.bin':
             raise PermissionError('denied')
-        return original_stat(self)
+        return original_stat(self, **kwargs)
 
     monkeypatch.setattr(Path, 'stat', fake_stat)
     index = cm.build_dest_index(dest, (), (), verbose=True)
@@ -131,10 +131,10 @@ def test_find_missing_files_handles_stat_and_hash_errors(monkeypatch, tmp_path, 
 
     original_stat = Path.stat
 
-    def fake_stat(self):
+    def fake_stat(self, **kwargs):
         if self.name == 'statfail.txt':
             raise PermissionError('cannot stat')
-        return original_stat(self)
+        return original_stat(self, **kwargs)
 
     monkeypatch.setattr(Path, 'stat', fake_stat)
 
@@ -158,7 +158,9 @@ def test_find_missing_files_handles_stat_and_hash_errors(monkeypatch, tmp_path, 
         workers=1,
         verbose=True,
     )
-    assert missing == ['missing.txt']
+    # stat-failed and hash-failed files must be treated as missing (safety:
+    # if we can't verify a source file exists in destination, report it).
+    assert sorted(missing) == ['hashfail.txt', 'missing.txt', 'statfail.txt']
     err = capsys.readouterr().err
     assert 'could not stat source file' in err
     assert 'could not hash source file' in err
@@ -259,6 +261,24 @@ def test_main_missing_source(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         cm.main()
     assert 'Source directory not found' in str(excinfo.value)
+
+
+def test_emit_progress_writes_percentage(capsys):
+    import io
+    out = io.StringIO()
+    cm.emit_progress(10, 84, file=out)
+    text = out.getvalue()
+    assert '10' in text
+    assert '84' in text
+    assert '11%' in text  # floor(10/84*100) == 11
+
+
+def test_emit_progress_writes_100_percent_when_done():
+    import io
+    out = io.StringIO()
+    cm.emit_progress(84, 84, file=out)
+    text = out.getvalue()
+    assert '100%' in text
 
 
 def test_entry_point_runs_via_runpy(monkeypatch):
