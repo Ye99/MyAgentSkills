@@ -56,10 +56,14 @@ def classify_media_signature(
     if mime.startswith("image/") or mime.startswith("video/"):
         return True, "mime-prefix", False
 
+    # The all-unknowns key is too broad to trust from cache — many unrelated
+    # extensionless files collapse into the same key.  Always re-triage per file.
+    all_unknowns = key == "unknown|unknown|unknown"
+
     cached = cache.get(key)
-    if cached == "media":
+    if cached == "media" and not all_unknowns:
         return True, "cache:media", False
-    if cached == "non_media":
+    if cached == "non_media" and not all_unknowns:
         return False, "cache:non_media", False
 
     if not mime or mime in {"application/octet-stream", "binary/octet-stream"}:

@@ -82,6 +82,11 @@ def log(message: str, verbose: bool) -> None:
         print(message, file=sys.stderr)
 
 
+def emit_progress(done: int, total: int, *, file=sys.stderr) -> None:
+    pct = int(done * 100 / total) if total else 100
+    print(f"\r[progress] {done}/{total} ({pct}%)", end="", flush=True, file=file)
+
+
 def normalized_extensions(exts: Sequence[str]) -> Tuple[str, ...]:
     return tuple(e.lower() if e.startswith('.') else f'.{e.lower()}' for e in exts)
 
@@ -214,6 +219,7 @@ def build_dest_index(dest: Path, skip_root_subdirs: Sequence[str], skip_extensio
 
 
 def build_dest_hash_sets(dest_index: Dict[int, List[Path]], chunk_size: int, workers: int, verbose: bool) -> Dict[int, Set[str]]:
+    total_files = sum(len(paths) for paths in dest_index.values())
     jobs = (
         HashJob(rel=None, path=path, size=size)
         for size, paths in dest_index.items()
@@ -224,9 +230,16 @@ def build_dest_hash_sets(dest_index: Dict[int, List[Path]], chunk_size: int, wor
     for job, digest, error in parallel_hash_jobs(jobs, chunk_size, workers):
         if error or digest is None:
             log(f'Warning: could not hash destination file {job.path}: {error}', True)
+            hashed += 1
+            if verbose:
+                emit_progress(hashed, total_files)
             continue
         size_hashes[job.size].add(digest)
         hashed += 1
+        if verbose:
+            emit_progress(hashed, total_files)
+    if verbose and total_files:
+        print(file=sys.stderr)
     log(f'Hashed {hashed} destination files across {len(size_hashes)} size buckets', verbose)
     return size_hashes
 
@@ -243,6 +256,7 @@ def find_missing_files(src: Path, dest_hash_sets: Dict[int, Set[str]], skip_root
                 size = path.stat().st_size
             except (OSError, PermissionError) as exc:
                 log(f'Warning: could not stat source file {path}: {exc}', True)
+                missing.append(rel.as_posix())
                 continue
             processed += 1
             if size not in dest_sizes:
@@ -250,13 +264,20 @@ def find_missing_files(src: Path, dest_hash_sets: Dict[int, Set[str]], skip_root
                 continue
             yield HashJob(rel=rel.as_posix(), path=path, size=size)
 
+    compared = 0
     for job, digest, error in parallel_hash_jobs(job_iter(), chunk_size, workers):
+        compared += 1
+        if verbose:
+            emit_progress(compared, compared)  # total unknown for streaming source
         if error or digest is None:
             log(f'Warning: could not hash source file {job.path}: {error}', True)
+            missing.append(job.rel or job.path.as_posix())
             continue
         hashes = dest_hash_sets.get(job.size)
         if not hashes or digest not in hashes:
             missing.append(job.rel or job.path.as_posix())
+    if verbose and compared:
+        print(file=sys.stderr)
     log(f'Processed {processed} source files; {len(missing)} missing by content', verbose)
     return missing
 
