@@ -221,11 +221,10 @@ file format: qcow2
     assert exit_code == 0
     assert commands == [
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
+        ["virsh", "-c", "qemu:///system", "dominfo", "vm"],
         ["virsh", "-c", "qemu:///system", "snapshot-delete", "vm", "--snapshotname", "snap1", "--metadata"],
         ["virsh", "-c", "qemu:///system", "snapshot-delete", "vm", "--snapshotname", "snap2", "--metadata"],
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
-        ["virsh", "-c", "qemu:///system", "domblklist", "vm"],
-        ["virsh", "-c", "qemu:///system", "dominfo", "vm"],
         ["virsh", "-c", "qemu:///system", "domblklist", "vm"],
         ["sudo", "-n", "qemu-img", "info", "--backing-chain", "/var/lib/libvirt/images/vm.snap2"],
         ["sudo", "-n", "qemu-img", "commit", "-p", "/var/lib/libvirt/images/vm.snap2"],

@@ -236,14 +236,19 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         confirm_all=args.all,
     )
 
+    if args.mode == "reclaim-space":
+        dominfo_output = virsh(uri, "dominfo", args.vm, dry_run=dry_run)
+        if dominfo_output.strip() and parse_dom_state(dominfo_output) != "shut off":
+            raise ValueError("VM must be shut off before reclaim-space")
+
     for snapshot in selected:
         virsh(uri, "snapshot-delete", args.vm, "--snapshotname", snapshot, "--metadata", dry_run=dry_run)
 
     virsh(uri, "snapshot-list", args.vm, dry_run=dry_run)
-    domblklist_output = virsh(uri, "domblklist", args.vm, dry_run=dry_run)
-    active_disk = parse_active_disk_path(domblklist_output) if domblklist_output.strip() else None
 
     if args.mode == "metadata-only":
+        domblklist_output = virsh(uri, "domblklist", args.vm, dry_run=dry_run)
+        active_disk = parse_active_disk_path(domblklist_output) if domblklist_output.strip() else None
         emit_summary(
             mode=args.mode,
             vm=args.vm,
@@ -256,9 +261,6 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         )
         return 0
 
-    dominfo_output = virsh(uri, "dominfo", args.vm, dry_run=dry_run)
-    if dominfo_output.strip() and parse_dom_state(dominfo_output) != "shut off":
-        raise ValueError("VM must be shut off before reclaim-space")
     chain = get_vm_disk_chain(vm=args.vm, uri=uri, dry_run=dry_run)
     for overlay in chain.overlays:
         sudo_qemu_img("commit", "-p", overlay, dry_run=dry_run)
