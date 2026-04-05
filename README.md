@@ -21,6 +21,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **setup-github-coauthors** ([`setup-github-coauthors/SKILL.md`](setup-github-coauthors/SKILL.md)): Set a repo-local git commit template with valid GitHub noreply co-author trailers for OpenCode, Claude, and Codex (using `openai` for `openai/codex`) with resolved account IDs and no hardcoded personal names or emails.
 - **organize-photos-and-videos-by-day** ([`organize-photos-and-videos-by-day/SKILL.md`](organize-photos-and-videos-by-day/SKILL.md)): Organize large source trees into `%Y/%Y_%m_%d` using offline geo-timezone conversion, high-fidelity media copy, and no-loss verification.
 - **utm-backup-restore** ([`utm-backup-restore/SKILL.md`](utm-backup-restore/SKILL.md)): Back up and restore UTM VM bundles with full macOS bundle metadata.
+- **virsh-delete-and-flatten-snapshots** ([`virsh-delete-and-flatten-snapshots/SKILL.md`](virsh-delete-and-flatten-snapshots/SKILL.md)): Remove libvirt external snapshot records or retire all restore points and reclaim QEMU/KVM overlay disk space with deterministic helper-script execution.
 - **virsh-vm-snapshots** ([`virsh-vm-snapshots/SKILL.md`](virsh-vm-snapshots/SKILL.md)): Manage external-only QEMU/KVM VM snapshots with `virsh` for UEFI-compatible backup workflows.
 
 ## AI agent rules
