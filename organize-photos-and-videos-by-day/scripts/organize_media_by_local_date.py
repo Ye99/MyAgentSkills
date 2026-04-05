@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -229,6 +230,98 @@ def _get_first_exif_datetime(record: dict[str, Any]) -> tuple[datetime | None, s
     return None, None
 
 
+def _resolve_embedded_capture_datetime(
+    record: dict[str, Any],
+    timezone_lookup: Callable[[float, float], str | None],
+    recording_tz: ZoneInfo | None = None,
+) -> tuple[datetime, str, str | None] | None:
+    lat = record.get("GPSLatitude")
+    lon = record.get("GPSLongitude")
+    lat_lon_available = lat is not None and lon is not None
+
+    exif_dt, exif_source = _get_first_exif_datetime(record)
+    if exif_dt is None:
+        return None
+
+    if exif_dt.tzinfo is not None:
+        if lat_lon_available:
+            timezone_name = timezone_lookup(float(lat), float(lon))
+            if timezone_name:
+                local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+                return local_dt, f"{exif_source}-offset-converted", timezone_name
+        if recording_tz is not None:
+            local_dt = exif_dt.astimezone(recording_tz).replace(tzinfo=None)
+            return local_dt, f"{exif_source}-recording-tz-converted", str(recording_tz)
+        return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
+
+    gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
+    if gps_utc is not None and lat_lon_available:
+        timezone_name = timezone_lookup(float(lat), float(lon))
+        if timezone_name:
+            local_dt = gps_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+            return local_dt, "gps-utc-converted", timezone_name
+        return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
+
+    return exif_dt, f"{exif_source}-naive-local", None
+
+
+def _parse_sequence_name(path: Path) -> tuple[str, int] | None:
+    match = re.match(r"^([A-Za-z]+)(\d+)$", path.stem)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
+
+
+def build_sequence_capture_overrides(
+    records: list[dict[str, Any]],
+    timezone_lookup: Callable[[float, float], str | None],
+    recording_tz: ZoneInfo | None = None,
+    max_sequence_gap: int = 3,
+) -> dict[str, tuple[datetime, str, str | None]]:
+    anchors_by_group: dict[tuple[str, str, str], list[tuple[int, int, tuple[datetime, str, str | None]]]] = {}
+    parsed_records: list[tuple[dict[str, Any], Path, tuple[str, int] | None]] = []
+
+    for index, record in enumerate(records):
+        source_path = Path(str(record.get("SourceFile") or ""))
+        seq = _parse_sequence_name(source_path)
+        parsed_records.append((record, source_path, seq))
+        if seq is None:
+            continue
+        embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz)
+        if embedded is None:
+            continue
+        prefix, number = seq
+        group = (str(source_path.parent), prefix, source_path.suffix.casefold())
+        anchors_by_group.setdefault(group, []).append((number, index, embedded))
+
+    overrides: dict[str, tuple[datetime, str, str | None]] = {}
+    for index, (record, source_path, seq) in enumerate(parsed_records):
+        if seq is None:
+            continue
+        source_key = str(source_path)
+        if source_key in overrides:
+            continue
+        if _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz) is not None:
+            continue
+
+        prefix, number = seq
+        group = (str(source_path.parent), prefix, source_path.suffix.casefold())
+        anchors = anchors_by_group.get(group, [])
+        if not anchors:
+            continue
+
+        candidate = min(
+            anchors,
+            key=lambda item: (abs(item[0] - number), abs(item[1] - index), 0 if item[1] >= index else 1),
+        )
+        if abs(candidate[0] - number) > max_sequence_gap:
+            continue
+
+        anchor_dt, anchor_source, anchor_tz = candidate[2]
+        overrides[source_key] = (anchor_dt, f"sequence-neighbor-{anchor_source}", anchor_tz)
+    return overrides
+
+
 def resolve_capture_datetime(
     record: dict[str, Any],
     creation_dt: datetime | None,
@@ -236,39 +329,14 @@ def resolve_capture_datetime(
     timezone_lookup: Callable[[float, float], str | None],
     recording_tz: ZoneInfo | None = None,
 ) -> tuple[datetime, str, str | None]:
-    lat = record.get("GPSLatitude")
-    lon = record.get("GPSLongitude")
-    lat_lon_available = lat is not None and lon is not None
-
-    exif_dt, exif_source = _get_first_exif_datetime(record)
-    if exif_dt is not None:
-        if exif_dt.tzinfo is not None:
-            if lat_lon_available:
-                timezone_name = timezone_lookup(float(lat), float(lon))
-                if timezone_name:
-                    local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
-                    return local_dt, f"{exif_source}-offset-converted", timezone_name
-            if recording_tz is not None:
-                local_dt = exif_dt.astimezone(recording_tz).replace(tzinfo=None)
-                return local_dt, f"{exif_source}-recording-tz-converted", str(recording_tz)
-            return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
-
-        gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
-        if gps_utc is not None and lat_lon_available:
-            timezone_name = timezone_lookup(float(lat), float(lon))
-            if timezone_name:
-                local_dt = gps_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
-                return local_dt, "gps-utc-converted", timezone_name
-            return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
-
-        return exif_dt, f"{exif_source}-naive-local", None
+    embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz)
+    if embedded is not None:
+        return embedded
 
     if recording_tz is not None:
         if creation_dt is not None:
-            local_dt = creation_dt.astimezone(recording_tz).replace(tzinfo=None)
-            return local_dt, "file-creation-time-recording-tz", str(recording_tz)
-        local_dt = mtime_dt.astimezone(recording_tz).replace(tzinfo=None)
-        return local_dt, "file-mtime-recording-tz", str(recording_tz)
+            return creation_dt, "file-creation-time-recording-local-assumed", str(recording_tz)
+        return mtime_dt, "file-mtime-recording-local-assumed", str(recording_tz)
 
     if creation_dt is not None:
         return creation_dt, "file-creation-time", None
@@ -639,6 +707,11 @@ def main() -> int:
     timezone_lookup = _create_timezone_lookup()
     metadata_records = _extract_metadata_records(source_root)
     records = merge_with_source_files(source_root, metadata_records)
+    sequence_capture_overrides = build_sequence_capture_overrides(
+        records=records,
+        timezone_lookup=timezone_lookup,
+        recording_tz=recording_tz,
+    )
 
     missing_gps_count = count_media_missing_gps(records)
     if missing_gps_count > 0 and recording_tz is None:
@@ -710,13 +783,17 @@ def main() -> int:
 
         creation_dt = _get_file_creation_time(source_path)
         mtime_dt = datetime.fromtimestamp(source_path.stat().st_mtime)
-        capture_dt, timestamp_source, timezone_name = resolve_capture_datetime(
-            record=record,
-            creation_dt=creation_dt,
-            mtime_dt=mtime_dt,
-            timezone_lookup=timezone_lookup,
-            recording_tz=recording_tz,
-        )
+        sequence_override = sequence_capture_overrides.get(str(source_path))
+        if sequence_override is not None:
+            capture_dt, timestamp_source, timezone_name = sequence_override
+        else:
+            capture_dt, timestamp_source, timezone_name = resolve_capture_datetime(
+                record=record,
+                creation_dt=creation_dt,
+                mtime_dt=mtime_dt,
+                timezone_lookup=timezone_lookup,
+                recording_tz=recording_tz,
+            )
 
         year_folder = capture_dt.strftime("%Y")
         day_folder = capture_dt.strftime("%Y_%m_%d")
