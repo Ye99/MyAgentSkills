@@ -153,12 +153,10 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         self.assertIn("recording-tz-converted", source)
         self.assertEqual(tz_name, "Asia/Shanghai")
 
-    def test_resolve_uses_recording_timezone_for_mtime_fallback(self) -> None:
-        """When falling back to mtime, convert from system tz to recording tz."""
+    def test_resolve_treats_mtime_fallback_as_recording_local_wall_time(self) -> None:
+        """When falling back to mtime, preserve the recording-local wall date."""
         record = {}
 
-        # mtime is Dec 30 09:13 in system local time (PST)
-        # Actual UTC is Dec 30 17:13 → China time Dec 31 01:13
         mtime_local = datetime(2025, 12, 30, 9, 13, 20)
 
         resolved, source, tz_name = mod.resolve_capture_datetime(
@@ -169,11 +167,71 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
             recording_tz=ZoneInfo("Asia/Shanghai"),
         )
 
-        # mtime from datetime.fromtimestamp() is already local; converting to
-        # recording tz: system-local → UTC → recording-tz
-        self.assertEqual(resolved.date().isoformat(), "2025-12-31")
-        self.assertIn("recording-tz", source)
+        self.assertEqual(resolved, datetime(2025, 12, 30, 9, 13, 20))
+        self.assertEqual(source, "file-mtime-recording-local-assumed")
         self.assertEqual(tz_name, "Asia/Shanghai")
+
+    def test_resolve_treats_creation_fallback_as_recording_local_wall_time(self) -> None:
+        """When falling back to file creation time, preserve the local wall date."""
+        record = {}
+        creation_local = datetime(2025, 12, 30, 8, 0, 0)
+
+        resolved, source, tz_name = mod.resolve_capture_datetime(
+            record=record,
+            creation_dt=creation_local,
+            mtime_dt=datetime(2025, 12, 30, 9, 13, 20),
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+        self.assertEqual(resolved, creation_local)
+        self.assertEqual(source, "file-creation-time-recording-local-assumed")
+        self.assertEqual(tz_name, "Asia/Shanghai")
+
+    def test_build_sequence_capture_overrides_uses_adjacent_anchored_clip(self) -> None:
+        records = [
+            {
+                "SourceFile": "/mnt/DCIM/100GOPRO/GX011737.MP4",
+                "MIMEType": "video/mp4",
+            },
+            {
+                "SourceFile": "/mnt/DCIM/100GOPRO/GX011738.MP4",
+                "MIMEType": "video/mp4",
+                "CreateDate": "2025:12:15 02:34:16",
+            },
+        ]
+
+        overrides = mod.build_sequence_capture_overrides(
+            records=records,
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+        override = overrides["/mnt/DCIM/100GOPRO/GX011737.MP4"]
+        self.assertEqual(override[0], datetime(2025, 12, 15, 2, 34, 16))
+        self.assertEqual(override[1], "sequence-neighbor-CreateDate-naive-local")
+        self.assertIsNone(override[2])
+
+    def test_build_sequence_capture_overrides_ignores_non_adjacent_anchor(self) -> None:
+        records = [
+            {
+                "SourceFile": "/mnt/DCIM/100GOPRO/GX011737.MP4",
+                "MIMEType": "video/mp4",
+            },
+            {
+                "SourceFile": "/mnt/DCIM/100GOPRO/GX011742.MP4",
+                "MIMEType": "video/mp4",
+                "CreateDate": "2025:12:15 03:49:19",
+            },
+        ]
+
+        overrides = mod.build_sequence_capture_overrides(
+            records=records,
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+        self.assertNotIn("/mnt/DCIM/100GOPRO/GX011737.MP4", overrides)
 
     def test_next_collision_path_uses_incrementing_suffix(self) -> None:
         existing = {
