@@ -51,3 +51,7 @@ When appending text to a note, insert it **before the first embedded-image block
 If you see an error like `"text part msg_0f33dbbb86dbf3db0169b8646639dc819c8a533b412f63ed97 not found"`, the `0f33dbbb86dbf3db0169b8646639dc819c8a533b412f63ed97` portion will change each time. It may come from the LLM or from the API layer dropping a message part. Retry the failed step; it will usually recover.
 
 If you hit an `SSE read timed out` error, retry the failed step once before doing anything more invasive; it usually recovers on the next attempt.
+
+## Python Tests
+
+Prefer `pytest` over `unittest` for Python tests. It provides fixtures and cleaner temporary-directory handling with less boilerplate.
