@@ -136,6 +136,22 @@ def is_explicit_non_media_path(path: Path) -> bool:
     return path.suffix.casefold() in EXCLUDED_NON_MEDIA_EXTENSIONS
 
 
+def count_media_missing_gps(records: list[dict[str, Any]]) -> int:
+    count = 0
+    for record in records:
+        source_path = Path(str(record.get("SourceFile") or ""))
+        if is_system_metadata_path(source_path):
+            continue
+        if is_explicit_non_media_path(source_path):
+            continue
+        mime = (record.get("MIMEType") or "").strip().lower()
+        if not (mime.startswith("image/") or mime.startswith("video/")):
+            continue
+        if record.get("GPSLatitude") is None or record.get("GPSLongitude") is None:
+            count += 1
+    return count
+
+
 def parse_exif_datetime(value: str | None, offset: str | None = None) -> datetime | None:
     if not value:
         return None
@@ -218,6 +234,7 @@ def resolve_capture_datetime(
     creation_dt: datetime | None,
     mtime_dt: datetime,
     timezone_lookup: Callable[[float, float], str | None],
+    recording_tz: ZoneInfo | None = None,
 ) -> tuple[datetime, str, str | None]:
     lat = record.get("GPSLatitude")
     lon = record.get("GPSLongitude")
@@ -231,6 +248,9 @@ def resolve_capture_datetime(
                 if timezone_name:
                     local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
                     return local_dt, f"{exif_source}-offset-converted", timezone_name
+            if recording_tz is not None:
+                local_dt = exif_dt.astimezone(recording_tz).replace(tzinfo=None)
+                return local_dt, f"{exif_source}-recording-tz-converted", str(recording_tz)
             return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
 
         gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
@@ -242,6 +262,13 @@ def resolve_capture_datetime(
             return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
 
         return exif_dt, f"{exif_source}-naive-local", None
+
+    if recording_tz is not None:
+        if creation_dt is not None:
+            local_dt = creation_dt.astimezone(recording_tz).replace(tzinfo=None)
+            return local_dt, "file-creation-time-recording-tz", str(recording_tz)
+        local_dt = mtime_dt.astimezone(recording_tz).replace(tzinfo=None)
+        return local_dt, "file-mtime-recording-tz", str(recording_tz)
 
     if creation_dt is not None:
         return creation_dt, "file-creation-time", None
@@ -557,6 +584,12 @@ def main() -> int:
         default="organize_media_report.json",
         help="JSON report output path",
     )
+    parser.add_argument(
+        "--recording-timezone",
+        default=None,
+        help="IANA timezone where media was recorded (e.g. Asia/Shanghai, America/Los_Angeles). "
+             "Required when any media file lacks GPS coordinates.",
+    )
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="Hash workers for verification")
     parser.add_argument("--verbose", action="store_true", help="Verbose verification logs")
     parser.add_argument("--apply", action="store_true", help="Apply copy actions")
@@ -567,6 +600,14 @@ def main() -> int:
     report_path = Path(args.report).expanduser().resolve()
     cache_path = Path(args.signature_cache).expanduser().resolve()
 
+    recording_tz: ZoneInfo | None = None
+    if args.recording_timezone is not None:
+        try:
+            recording_tz = ZoneInfo(args.recording_timezone)
+        except (KeyError, ValueError):
+            print(f"Invalid recording timezone: {args.recording_timezone!r}. Use an IANA timezone like 'Asia/Shanghai'.", file=sys.stderr)
+            return 2
+
     if not source_root.is_dir():
         print(f"Source root not found: {source_root}", file=sys.stderr)
         return 2
@@ -576,6 +617,16 @@ def main() -> int:
     timezone_lookup = _create_timezone_lookup()
     metadata_records = _extract_metadata_records(source_root)
     records = merge_with_source_files(source_root, metadata_records)
+
+    missing_gps_count = count_media_missing_gps(records)
+    if missing_gps_count > 0 and recording_tz is None:
+        print(
+            f"Error: {missing_gps_count} media file(s) lack GPS coordinates.\n"
+            f"Re-run with --recording-timezone <IANA> (e.g. --recording-timezone Asia/Shanghai) "
+            f"to ensure correct date assignment.",
+            file=sys.stderr,
+        )
+        return 2
 
     copied: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
@@ -642,6 +693,7 @@ def main() -> int:
             creation_dt=creation_dt,
             mtime_dt=mtime_dt,
             timezone_lookup=timezone_lookup,
+            recording_tz=recording_tz,
         )
 
         year_folder = capture_dt.strftime("%Y")

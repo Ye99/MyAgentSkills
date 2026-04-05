@@ -23,12 +23,14 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 
 1. Inputs are `source_root` and `destination_root`.
 2. Target layout is `%Y/%Y_%m_%d`.
-3. Timestamp fallback chain:
-   - EXIF/media capture datetime
-   - file creation time
-   - file mtime
-4. If EXIF datetime is naive and GPS UTC tags exist, use GPS UTC + offline timezone conversion.
-5. If EXIF datetime is naive and GPS UTC tags do not exist, keep EXIF datetime as local-naive.
+3. A pre-scan checks if any media files lack GPS. If so, `--recording-timezone` is required (fail-fast). If all media have GPS, the flag is optional.
+4. Timestamp fallback chain:
+   - EXIF/media capture datetime (with GPS or recording-timezone conversion)
+   - file creation time (converted via recording-timezone when provided)
+   - file mtime (converted via recording-timezone when provided)
+5. If EXIF datetime is naive and GPS UTC tags exist, use GPS UTC + offline timezone conversion.
+6. If EXIF datetime has offset but no GPS, convert to recording-timezone (handles QuickTimeUTC system-tz mismatch).
+7. If EXIF datetime is naive and GPS UTC tags do not exist, keep EXIF datetime as local-naive.
 6. Copy media without metadata rewrite (high-fidelity copy), never move/delete source.
 7. Collision policy: deterministic suffix `_col001`, `_col002`, ... (name collision, different content)
 8. Do not hardcode media extensions. Classify via metadata MIME/FileType.
@@ -54,17 +56,22 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 Dry-run report:
 
 ```bash
-python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" --report organize_media_report.json
+python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
+    --recording-timezone Asia/Shanghai \
+    --report organize_media_report.json
 ```
 
 Apply copy:
 
 ```bash
-python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" --apply --report organize_media_report.json
+python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
+    --recording-timezone Asia/Shanghai \
+    --apply --report organize_media_report.json
 ```
 
 Optional:
 
+- `--recording-timezone <IANA>` — timezone where media was recorded (e.g. `Asia/Shanghai`). Required when media files lack GPS; script scans and exits with count if needed.
 - `--signature-cache <path>`
 - `--workers <n>`
 - `--verbose`

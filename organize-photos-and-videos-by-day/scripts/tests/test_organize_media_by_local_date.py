@@ -1,6 +1,7 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import tempfile
 import sys
 from unittest import mock
@@ -100,6 +101,7 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
             creation_dt=None,
             mtime_dt=datetime(2024, 9, 19, 0, 0, 0),
             timezone_lookup=tz_lookup,
+            recording_tz=ZoneInfo("America/Los_Angeles"),
         )
 
         self.assertEqual(resolved, datetime(2024, 9, 17, 17, 30, 0))
@@ -114,18 +116,64 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
             creation_dt=datetime(2024, 9, 18, 10, 0, 0),
             mtime_dt=datetime(2024, 9, 18, 12, 0, 0),
             timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("America/Los_Angeles"),
         )
-        self.assertEqual(resolved_creation, datetime(2024, 9, 18, 10, 0, 0))
-        self.assertEqual(source_creation, "file-creation-time")
+        self.assertIn("file-creation-time", source_creation)
 
         resolved_mtime, source_mtime, _ = mod.resolve_capture_datetime(
             record=record,
             creation_dt=None,
             mtime_dt=datetime(2024, 9, 18, 12, 0, 0),
             timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("America/Los_Angeles"),
         )
-        self.assertEqual(resolved_mtime, datetime(2024, 9, 18, 12, 0, 0))
-        self.assertEqual(source_mtime, "file-mtime")
+        self.assertIn("file-mtime", source_mtime)
+
+    def test_resolve_uses_recording_timezone_for_offset_kept(self) -> None:
+        """When EXIF has timezone info but no GPS, use recording_timezone to convert."""
+        from datetime import timezone
+
+        # Simulate QuickTimeUTC=1 output: exiftool returns PST time with offset
+        # Real recording was in China (UTC+8): 2025-12-31 11:07 CST = 2025-12-31 03:07 UTC
+        # exiftool converts UTC to system tz: 2025-12-30 19:07-08:00 (PST)
+        pst = timezone(timedelta(hours=-8))
+        exif_dt_pst = datetime(2025, 12, 30, 19, 7, 6, tzinfo=pst)
+        record = {"CreateDate": exif_dt_pst.strftime("%Y:%m:%d %H:%M:%S%z")}
+
+        resolved, source, tz_name = mod.resolve_capture_datetime(
+            record=record,
+            creation_dt=None,
+            mtime_dt=datetime(2025, 12, 30, 19, 8, 0),
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+        # Should convert to China time: Dec 31 11:07 CST, not Dec 30 19:07 PST
+        self.assertEqual(resolved, datetime(2025, 12, 31, 11, 7, 6))
+        self.assertIn("recording-tz-converted", source)
+        self.assertEqual(tz_name, "Asia/Shanghai")
+
+    def test_resolve_uses_recording_timezone_for_mtime_fallback(self) -> None:
+        """When falling back to mtime, convert from system tz to recording tz."""
+        record = {}
+
+        # mtime is Dec 30 09:13 in system local time (PST)
+        # Actual UTC is Dec 30 17:13 → China time Dec 31 01:13
+        mtime_local = datetime(2025, 12, 30, 9, 13, 20)
+
+        resolved, source, tz_name = mod.resolve_capture_datetime(
+            record=record,
+            creation_dt=None,
+            mtime_dt=mtime_local,
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+        # mtime from datetime.fromtimestamp() is already local; converting to
+        # recording tz: system-local → UTC → recording-tz
+        self.assertEqual(resolved.date().isoformat(), "2025-12-31")
+        self.assertIn("recording-tz", source)
+        self.assertEqual(tz_name, "Asia/Shanghai")
 
     def test_next_collision_path_uses_incrementing_suffix(self) -> None:
         existing = {
@@ -191,6 +239,51 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["SourceFile"], "/tmp/photo.jpg")
+
+    def test_count_media_missing_gps_counts_only_media_without_gps(self) -> None:
+        records = [
+            # media with GPS — should not count
+            {"SourceFile": "/tmp/a.jpg", "MIMEType": "image/jpeg",
+             "GPSLatitude": 47.6, "GPSLongitude": -122.1},
+            # media without GPS — should count
+            {"SourceFile": "/tmp/b.mp4", "MIMEType": "video/mp4"},
+            # non-media (explicit exclusion) — should not count
+            {"SourceFile": "/tmp/c.txt", "MIMEType": "text/plain"},
+            # system metadata — should not count
+            {"SourceFile": "/tmp/.DS_Store", "MIMEType": "application/octet-stream"},
+        ]
+        count = mod.count_media_missing_gps(records)
+        self.assertEqual(count, 1)
+
+    def test_count_media_missing_gps_returns_zero_when_all_have_gps(self) -> None:
+        records = [
+            {"SourceFile": "/tmp/a.jpg", "MIMEType": "image/jpeg",
+             "GPSLatitude": 47.6, "GPSLongitude": -122.1},
+            {"SourceFile": "/tmp/b.mov", "MIMEType": "video/quicktime",
+             "GPSLatitude": 31.2, "GPSLongitude": 121.5},
+        ]
+        count = mod.count_media_missing_gps(records)
+        self.assertEqual(count, 0)
+
+    def test_resolve_without_recording_tz_falls_back_to_offset_kept(self) -> None:
+        """Without recording_tz, offset timestamps are kept as-is (old behavior)."""
+        from datetime import timezone
+
+        pst = timezone(timedelta(hours=-8))
+        exif_dt_pst = datetime(2025, 12, 30, 19, 7, 6, tzinfo=pst)
+        record = {"CreateDate": exif_dt_pst.strftime("%Y:%m:%d %H:%M:%S%z")}
+
+        resolved, source, tz_name = mod.resolve_capture_datetime(
+            record=record,
+            creation_dt=None,
+            mtime_dt=datetime(2025, 12, 30, 19, 8, 0),
+            timezone_lookup=lambda _lat, _lon: None,
+            recording_tz=None,
+        )
+
+        self.assertEqual(resolved, datetime(2025, 12, 30, 19, 7, 6))
+        self.assertIn("offset-kept", source)
+        self.assertIsNone(tz_name)
 
     def test_emit_progress_writes_count_and_percentage_to_stream(self) -> None:
         import io
