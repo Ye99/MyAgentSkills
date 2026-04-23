@@ -5,3 +5,4 @@ __pycache__/
 folder-poi-itinerary-rename/scripts/cache/
 folder_poi_itinerary_rename_state*.json
 organize-photos-and-videos-by-day/scripts/signature_type_cache.json
+.system
