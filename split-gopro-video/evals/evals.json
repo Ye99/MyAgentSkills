@@ -1,71 +1,78 @@
 {
-  "skill_name": "gopro-split-video",
+  "skill_name": "split-gopro-video",
   "evals": [
     {
       "id": 1,
       "prompt": "I have a GoPro video at {{source_path}}. I want to cut out {{seg1_start}} to {{seg1_end}} and save it as {{seg1_name}}, and {{seg2_start}} to {{seg2_end}} as {{seg2_name}}. Keep the original quality and GPS data. Save both to {{output_dir}}",
       "parameters": {
-        "source_path": "/mnt/trip/DCIM/100GOPRO/GX011864.MP4",
+        "source_path": "/mnt/testdata/DCIM/100GOPRO/GX011864.MP4",
         "seg1_start": "0:00",
         "seg1_end": "2:35",
-        "seg1_name": "StegasteinDrive.MP4",
+        "seg1_name": "SegmentA.MP4",
         "seg2_start": "2:35",
         "seg2_end": "6:18",
-        "seg2_name": "AurlandShopping.MP4",
-        "output_dir": "~/"
+        "seg2_name": "SegmentB.MP4",
+        "output_dir": "/tmp/output/"
       },
-      "expected_output": "Two MP4 files created with stream copy (no re-encoding), GPMF track preserved, and timestamps patched to correct recording times.",
+      "expected_output": "Two MP4 files created with stream copy (no re-encoding), keyframe-aligned cut boundaries, GPMF track preserved, and timestamps patched to correct recording times.",
       "files": [],
       "assertions": [
         "Uses ffmpeg -c copy (no re-encoding)",
-        "Maps streams 0:0, 0:1, 0:3 explicitly (not -map 0)",
+        "Probes for nearby keyframes and snaps segment boundaries to keyframes at or after the requested times",
+        "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd (standard layout: 0:0, 0:1, 0:3)",
         "Runs exiftool with -TrackCreateDate and -MediaCreateDate to fix timestamps",
-        "Output files contain gpmd meta format (GPMF GPS track present)"
+        "Output files contain gpmd meta format (GPMF GPS track present)",
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     },
     {
       "id": 2,
       "prompt": "Can you trim my GoPro footage? File is {{source_path}}. I just need from {{start_time}} to {{end_time}} saved as {{output_name}} in {{output_dir}}. Don't re-encode it, I want it to stay 4K HEVC.",
       "parameters": {
-        "source_path": "~/Videos/GX020045.MP4",
+        "source_path": "/mnt/testdata/GX020045.MP4",
         "start_time": "0:00",
         "end_time": "1:30",
-        "output_name": "Intro.MP4",
-        "output_dir": "~/Videos/"
+        "output_name": "Clip01.MP4",
+        "output_dir": "/tmp/output/"
       },
-      "expected_output": "Intro.MP4 created with stream copy, correct 90-second duration, timestamps patched.",
+      "expected_output": "Clip01.MP4 created with stream copy, a keyframe-aligned duration of at least the requested 90 seconds, and patched timestamps.",
       "files": [],
       "assertions": [
         "Uses ffmpeg -c copy",
-        "Uses -map 0:0 -map 0:1 -map 0:3 (not -map 0)",
-        "Output duration is approximately 90 seconds",
-        "Runs exiftool to fix timestamps on the output"
+        "Probes for nearby keyframes and snaps the end boundary to the first keyframe at or after 1:30",
+        "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd (standard layout: 0:0, 0:1, 0:3)",
+        "Output duration is at least the requested 90 seconds because the end snaps forward to a keyframe",
+        "Runs exiftool to fix timestamps on the output",
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     },
     {
       "id": 3,
       "prompt": "I filmed a long drive on my GoPro Hero 12 and the file is {{source_path}}. Split it into three parts: {{seg1_start}}-{{seg1_end}} as {{seg1_name}}, {{seg2_start}}-{{seg2_end}} as {{seg2_name}}, and {{seg3_start}}-{{seg3_end}} as {{seg3_name}} — all in {{output_dir}}. I need the GPS telemetry data intact in each clip.",
       "parameters": {
-        "source_path": "/mnt/gopro/GX030210.MP4",
+        "source_path": "/mnt/testdata/GX030210.MP4",
         "seg1_start": "0:00",
         "seg1_end": "5:00",
-        "seg1_name": "PartA.MP4",
+        "seg1_name": "Segment1.MP4",
         "seg2_start": "5:00",
         "seg2_end": "12:30",
-        "seg2_name": "PartB.MP4",
+        "seg2_name": "Segment2.MP4",
         "seg3_start": "12:30",
         "seg3_end": "20:00",
-        "seg3_name": "PartC.MP4",
-        "output_dir": "/mnt/gopro/clips/"
+        "seg3_name": "Segment3.MP4",
+        "output_dir": "/tmp/output/"
       },
-      "expected_output": "Three MP4 files with stream copy, GPMF track in each, timestamps offset correctly per segment start time.",
+      "expected_output": "Three MP4 files with stream copy, keyframe-aligned shared boundaries, GPMF track in each, and timestamps offset correctly per segment start time.",
       "files": [],
       "assertions": [
         "Uses ffmpeg -c copy for all three segments",
-        "GPMF stream (0:3 / gpmd) mapped in each output",
-        "Timestamps on PartB offset by 300 seconds from source create date",
-        "Timestamps on PartC offset by 750 seconds from source create date",
-        "Probes source first to confirm stream layout before cutting"
+        "Probes source first to confirm stream layout before cutting",
+        "Resolves split points to keyframes at or after 5:00 and 12:30 so adjacent segments share exact boundaries",
+        "GPMF stream is preserved in each output by mapping the probed gpmd stream explicitly",
+        "Timestamps on Segment2 offset by 300 seconds from source create date",
+        "Timestamps on Segment3 offset by 750 seconds from source create date",
+        "Excludes the tmcd stream from each output",
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     }
   ]
