@@ -1,20 +1,16 @@
 ---
 name: split-gopro-video
 description: >-
-  Use when splitting, trimming, cutting, or extracting segments from GoPro MP4 files
-  (GX*.MP4, files in DCIM/100GOPRO/, or any file the user identifies as GoPro footage).
-  This skill is required — do NOT attempt GoPro video splitting with generic ffmpeg knowledge.
-  GoPro HEVC MP4 files contain a hidden timecode track (tmcd) that silently breaks standard
-  -map 0 -c copy output. The correct approach requires explicit stream selection
-  (-map 0:0 -map 0:1 -map 0:3) and exiftool timestamp repair — GoPro-specific knowledge
-  not derivable from general ffmpeg usage. Trigger on any request to cut, clip, trim, split,
-  or segment a GoPro recording by time range, especially when the user names a GX*.MP4 file,
-  mentions DCIM/100GOPRO, or asks to preserve quality, GPS, or original bitrate.
+  Use when splitting, trimming, cutting, clipping, or extracting time-range segments from GoPro
+  MP4 footage, especially when the user wants stream-copy quality, preserved GPS/telemetry data,
+  original bitrate, or files such as GX*.MP4 and DCIM/100GOPRO recordings.
 ---
 
 # GoPro Video Splitter
 
 Split GoPro MP4 files into named time-range segments with full fidelity — original HEVC codec, bitrate, GPMF GPS/telemetry track, and accurate per-segment timestamps all preserved.
+
+Prefer mature open-source tools (`ffmpeg`, `ffprobe`, `exiftool`) over custom container-rewriting code in this workflow.
 
 ## Why this matters
 
@@ -36,7 +32,7 @@ ffprobe -v quiet \
   -of json <source.MP4>
 ```
 
-Standard GoPro stream layout:
+Typical GoPro stream layout:
 
 | Index | Codec | Tag | What to do |
 |-------|-------|-----|------------|
@@ -80,7 +76,8 @@ This ensures no frame is dropped at the boundary.
 
 ## Step 3 — Cut each segment
 
-Use explicit stream mapping (`0:0 0:1 0:3`) and the resolved keyframe timestamps:
+Use explicit stream mapping for the probed video, audio, and `gpmd` streams while excluding
+`tmcd`. For the typical layout above, that is `0:0 0:1 0:3`.
 
 ```bash
 # Segment 1: 0 to keyframe boundary (e.g. 155.155s)
@@ -102,7 +99,7 @@ ffmpeg -y -ss 155.155 -i source.MP4 \
 
 **Why `-to` is a duration here:** When `-ss` is an input option, `-to` on the output is relative to the seek point, not the original file start.
 
-## Step 3 — Fix timestamps
+## Step 4 — Fix timestamps
 
 ffmpeg zeros all MP4 container timestamps when writing new files. You need to patch three levels of atoms — the top-level `mvhd`, the per-track `tkhd`, and the media `mdhd`:
 
@@ -123,91 +120,6 @@ Using only `-AllDates` is not enough — it covers `mvhd` but leaves `tkhd`/`mdh
 
 GoPro timestamps are UTC. Add seconds to get each segment's start time (e.g., a segment starting at 2:35 = 155 s after the source create date).
 
-## Step 4 — Restore GoPro camera metadata (`udta` box)
-
-ffmpeg silently drops GoPro's proprietary `udta` box, which holds camera model, serial number, firmware version, and all recording settings (White Balance, Pro Tune, ISO, FOV, EIS, etc.). Restore it by copying the raw atom from the source.
-
-**Extract `udta` from source (Python — run once per source file):**
-
-```python
-import struct, os
-
-def extract_udta(source_mp4, out_bin):
-    filesize = os.path.getsize(source_mp4)
-    with open(source_mp4, 'rb') as f:
-        pos = 0
-        while pos < filesize:
-            f.seek(pos)
-            size = struct.unpack('>I', f.read(4))[0]
-            name = f.read(4).decode('latin1')
-            if size == 0: size = filesize - pos
-            if name == 'moov':
-                inner = pos + 8
-                while inner < pos + size:
-                    f.seek(inner)
-                    s2 = struct.unpack('>I', f.read(4))[0]
-                    n2 = f.read(4).decode('latin1')
-                    if n2 == 'udta':
-                        f.seek(inner)
-                        data = f.read(s2)
-                        with open(out_bin, 'wb') as g: g.write(data)
-                        print(f"Extracted udta: {s2} bytes → {out_bin}")
-                        return
-                    inner += s2
-                break
-            pos += size
-
-extract_udta('source.MP4', '/tmp/gopro_udta.bin')
-```
-
-**Inject `udta` into each segment (Python):**
-
-```python
-import struct, os
-
-def inject_udta(target_mp4, udta_bin):
-    with open(udta_bin, 'rb') as f:
-        udta_data = f.read()
-    filesize = os.path.getsize(target_mp4)
-    with open(target_mp4, 'rb') as f:
-        pos = 0
-        moov_offset = moov_size = None
-        while pos < filesize:
-            f.seek(pos)
-            sz = struct.unpack('>I', f.read(4))[0]
-            nm = f.read(4).decode('latin1')
-            if sz == 0: sz = filesize - pos
-            if nm == 'moov': moov_offset, moov_size = pos, sz; break
-            pos += sz
-        moov_end = moov_offset + moov_size
-        inner, old_off, old_sz = moov_offset + 8, None, None
-        while inner < moov_end:
-            f.seek(inner)
-            s2 = struct.unpack('>I', f.read(4))[0]
-            n2 = f.read(4).decode('latin1')
-            if n2 == 'udta': old_off, old_sz = inner, s2; break
-            inner += s2
-        f.seek(0); file_data = bytearray(f.read())
-    if old_off is not None:
-        new_data = file_data[:old_off] + bytearray(udta_data) + file_data[old_off+old_sz:]
-    else:
-        new_data = file_data[:moov_end] + bytearray(udta_data) + file_data[moov_end:]
-    struct.pack_into('>I', new_data, moov_offset, moov_size + len(udta_data) - (old_sz or 0))
-    tmp = target_mp4 + '.tmp'
-    with open(tmp, 'wb') as f: f.write(new_data)
-    os.replace(tmp, target_mp4)
-    print(f"Injected udta into {target_mp4}")
-
-inject_udta('Segment1.MP4', '/tmp/gopro_udta.bin')
-inject_udta('Segment2.MP4', '/tmp/gopro_udta.bin')
-```
-
-**Verify:**
-```bash
-exiftool -api largefilesupport=1 Segment1.MP4 | grep -E "Camera Model|Firmware|Serial|Pro Tune|White Balance"
-# Expect: Camera Model Name, Firmware Version, Lens/Camera Serial Number, recording settings
-```
-
 ## Step 5 — Verify
 
 ```bash
@@ -219,7 +131,14 @@ exiftool -api largefilesupport=1 <output.MP4> \
 - All date fields show the correct recording time (not `0000:00:00`)
 - `Meta Format: gpmd` — GPMF/GPS track is present
 - `Avg Bitrate` will read higher than the source (~100 Mbps vs ~70 Mbps) — this is normal for shorter clips due to MP4 container overhead math; the actual encoded frames are untouched
-- `MP4Box -info` shows 10 UDTA types including FIRM and LENS
+
+## Important limitation — do not raw-copy `udta`
+
+ffmpeg drops GoPro's proprietary `udta` box, which contains camera model, serial number, firmware version, and recording settings.
+
+Do **not** try to restore `udta` by byte-splicing Python code or any other raw atom-copy approach. That can leave MP4 sample/chunk offsets inconsistent and produce files that look metadata-complete but no longer decode in VLC or ffmpeg.
+
+Treat `udta` restoration as out of scope for this skill unless you are using a dedicated MP4 atom editor that rewrites all affected offsets correctly.
 
 ## Common pitfalls
 
@@ -227,12 +146,14 @@ exiftool -api largefilesupport=1 <output.MP4> \
 |---------|-----|
 | Cutting at user's exact timestamp without keyframe alignment | Causes snow/macroblocking at segment start — always snap to keyframe at or after the boundary |
 | Snapping boundary backward (to keyframe before) | Loses frames between that keyframe and the boundary — snap forward instead |
-| `-map 0` instead of explicit indices | The `tmcd` stream (index 2) breaks MP4 output — always map 0:0, 0:1, 0:3 |
+| `-map 0` instead of explicit kept streams | The `tmcd` stream breaks MP4 output — map the probed video/audio/gpmd streams explicitly and exclude `tmcd` |
 | Only using `-AllDates` in exiftool | Track-level timestamps stay zeroed — add the four `-Track*` / `-Media*` flags |
 | Re-encoding via kdenlive/melt/HandBrake | Drops bitrate 10–15×; use `-c copy` to preserve the original |
 | Treating `-to` as an end timestamp | When `-ss` is an input option, `-to` is duration from the cut point |
-| Skipping `udta` restoration | ffmpeg silently drops camera model, serial, firmware, and all recording settings |
+| Trying to raw-copy `udta` with Python byte splicing | Can corrupt MP4 offsets and make the clip unplayable — do not do this in this workflow |
+| Replacing a standard tool step with custom container-editing code | Prefer existing open-source tools unless you have a validated MP4 atom editor that preserves playback |
 
 ## What is not preserved
 
 - **Timecode track** (`tmcd`) — dropped intentionally; it is incompatible with MP4 muxing alongside HEVC.
+- **GoPro proprietary `udta` camera metadata** — not preserved by this safe ffmpeg + exiftool workflow.
