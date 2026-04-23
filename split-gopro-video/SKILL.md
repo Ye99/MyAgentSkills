@@ -132,6 +132,18 @@ exiftool -api largefilesupport=1 <output.MP4> \
 - `Meta Format: gpmd` — GPMF/GPS track is present
 - `Avg Bitrate` will read higher than the source (~100 Mbps vs ~70 Mbps) — this is normal for shorter clips due to MP4 container overhead math; the actual encoded frames are untouched
 
+**Full ffmpeg decode-pass validation for exported clips:**
+
+Run a complete decode of the exported video and audio streams. This catches container corruption and playback failures that metadata checks alone will miss.
+
+```bash
+ffmpeg -v error -xerror -i Segment1.MP4 \
+  -map 0:v:0 -map 0:a:0 \
+  -f null -
+```
+
+No output means the clip decoded cleanly end to end.
+
 **High-confidence preservation check for supported streams:**
 
 Use `streamhash` to compare the source cut range against the exported clip for the supported streams only: video, audio, and `gpmd` telemetry.
