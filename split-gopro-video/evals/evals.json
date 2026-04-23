@@ -22,6 +22,7 @@
         "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd (standard layout: 0:0, 0:1, 0:3)",
         "Runs exiftool with -TrackCreateDate and -MediaCreateDate to fix timestamps",
         "Output files contain gpmd meta format (GPMF GPS track present)",
+        "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     },
@@ -43,6 +44,7 @@
         "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd (standard layout: 0:0, 0:1, 0:3)",
         "Output duration is at least the requested 90 seconds because the end snaps forward to a keyframe",
         "Runs exiftool to fix timestamps on the output",
+        "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     },
@@ -72,6 +74,7 @@
         "Timestamps on Segment2 offset by 300 seconds from source create date",
         "Timestamps on Segment3 offset by 750 seconds from source create date",
         "Excludes the tmcd stream from each output",
+        "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between each source cut range and exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     }

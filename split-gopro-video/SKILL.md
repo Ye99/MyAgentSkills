@@ -132,6 +132,25 @@ exiftool -api largefilesupport=1 <output.MP4> \
 - `Meta Format: gpmd` — GPMF/GPS track is present
 - `Avg Bitrate` will read higher than the source (~100 Mbps vs ~70 Mbps) — this is normal for shorter clips due to MP4 container overhead math; the actual encoded frames are untouched
 
+**High-confidence preservation check for supported streams:**
+
+Use `streamhash` to compare the source cut range against the exported clip for the supported streams only: video, audio, and `gpmd` telemetry.
+
+```bash
+# Source range for segment 1
+ffmpeg -v error -ss 0 -i source.MP4 \
+  -to 155.155 \
+  -map 0:0 -map 0:1 -map 0:3 \
+  -c copy -f streamhash -hash sha256 -
+
+# Exported segment 1
+ffmpeg -v error -i Segment1.MP4 \
+  -map 0:0 -map 0:1 -map 0:2 \
+  -c copy -f streamhash -hash sha256 -
+```
+
+Matching hashes confirm the exported clip preserved the supported stream payloads exactly. Do not expect byte-for-byte identity for container metadata, timestamps, brands, or GoPro proprietary `udta` data.
+
 ## Important limitation — do not raw-copy `udta`
 
 ffmpeg drops GoPro's proprietary `udta` box, which contains camera model, serial number, firmware version, and recording settings.
