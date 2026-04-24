@@ -22,6 +22,29 @@ GoPro files have four streams: video, audio, a timecode track, and a GPMF track 
 sudo apt install ffmpeg exiftool
 ```
 
+Ensure the output directory has at least as much free space as the source file — stream-copy segments are proportionally the same size as the original.
+
+## Step 0 — Check for multi-chapter files
+
+GoPro splits long recordings into ~4 GB chapters: `GX010001.MP4`, `GX020001.MP4`, `GX030001.MP4`, etc. The last four digits are the recording ID; the two digits after `GX` are the chapter number. If your source recording spans multiple chapters, you must concatenate them before splitting — otherwise you lose all footage after the first chapter.
+
+```bash
+# List all chapters for recording 0001
+ls GX*0001.MP4
+```
+
+If multiple chapters exist, concatenate with the ffmpeg concat demuxer:
+
+```bash
+# Create a file list
+for f in GX*0001.MP4; do echo "file '$f'"; done > chapters.txt
+
+# Concatenate (stream copy — no re-encode)
+ffmpeg -f concat -safe 0 -i chapters.txt -c copy -map 0:0 -map 0:1 -map 0:3 full_recording.MP4
+```
+
+Use `full_recording.MP4` as the source for all subsequent steps. If only one chapter exists, proceed directly.
+
 ## Step 1 — Probe the source
 
 Before cutting, verify the stream layout and capture the recording timestamp:
@@ -51,8 +74,10 @@ exiftool -api largefilesupport=1 <source.MP4> | grep "Create Date"
 
 Stream copy must start and end on keyframe boundaries to avoid visual corruption (snow/macroblocking) at segment boundaries. GoPro records a keyframe every ~1 second. Always resolve the user's timestamps to actual keyframe timestamps before cutting.
 
+Use a ±15 second window around the target time. GoPro keyframe intervals are typically 1–2 seconds, so this is generous.
+
 ```bash
-# Find all keyframes near a boundary time (e.g. around 2:35 = 155s)
+# Find all keyframes near a boundary time (e.g. around 2:35 = 155s → window 2:20–2:50)
 ffprobe -select_streams v \
   -read_intervals "00:02:20%00:02:50" \
   -show_frames \
@@ -74,10 +99,14 @@ ffprobe -select_streams v \
 
 This ensures no frame is dropped at the boundary.
 
+**Use exact timestamps:** Copy the `best_effort_timestamp_time` value from ffprobe output verbatim (e.g. `155.155000`) into your ffmpeg commands. Do not round, truncate, or reformat — an inexact value may cause ffmpeg's input seeker to land on a different keyframe than the one you resolved.
+
 ## Step 3 — Cut each segment
 
 Use explicit stream mapping for the probed video, audio, and `gpmd` streams while excluding
-`tmcd`. For the typical layout above, that is `0:0 0:1 0:3`.
+`tmcd`. For the typical layout above, that is `0:0 0:1 0:3`. **Always use the actual indices from your Step 1 ffprobe output** — some GoPro models have additional streams that shift the indices.
+
+Check ffmpeg's exit status after each cut. If non-zero, investigate before proceeding — do not patch timestamps on a failed or partial export.
 
 ```bash
 # Segment 1: 0 to keyframe boundary (e.g. 155.155s)
@@ -87,9 +116,11 @@ ffmpeg -y -ss 0 -i source.MP4 \
   -c copy \
   Segment1.MP4
 
-# Segment 2: keyframe boundary to end (duration = end_keyframe - 155.155)
+# Segment 2: keyframe boundary to end
+# Duration = end_keyframe − start_keyframe.  If end keyframe resolved to 378.378:
+#   378.378 − 155.155 = 223.223
 ffmpeg -y -ss 155.155 -i source.MP4 \
-  -to <duration> \
+  -to 223.223 \
   -map 0:0 -map 0:1 -map 0:3 \
   -c copy \
   Segment2.MP4
@@ -183,6 +214,9 @@ Treat `udta` restoration as out of scope for this skill unless you are using a d
 | Treating `-to` as an end timestamp | When `-ss` is an input option, `-to` is duration from the cut point |
 | Trying to raw-copy `udta` with Python byte splicing | Can corrupt MP4 offsets and make the clip unplayable — do not do this in this workflow |
 | Replacing a standard tool step with custom container-editing code | Prefer existing open-source tools unless you have a validated MP4 atom editor that preserves playback |
+| Running exiftool on the source file instead of the exported segments | Never modify the source — only patch timestamps on output segments |
+| Processing only the first chapter of a multi-chapter recording | Check for `GX02*`, `GX03*`, etc. and concatenate all chapters before splitting |
+| Not checking ffmpeg exit status before proceeding | A non-zero exit means a partial or corrupt output — investigate before patching timestamps |
 
 ## What is not preserved
 
