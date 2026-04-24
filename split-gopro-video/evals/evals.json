@@ -26,7 +26,8 @@
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying",
         "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
-        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching",
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
       ]
     },
     {
@@ -51,7 +52,8 @@
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying",
         "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
-        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching",
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
       ]
     },
     {
@@ -84,7 +86,8 @@
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between each source cut range and exported clip",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying",
         "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
-        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching",
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
       ]
     },
     {
@@ -111,6 +114,29 @@
         "Probes for nearby keyframes and snaps boundaries to keyframes at or after the requested times",
         "Runs exiftool with -TrackCreateDate and -MediaCreateDate to fix timestamps",
         "Runs a full ffmpeg decode pass on the exported video and audio streams",
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying",
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I have a GoPro file at {{source_path}}. I want to grab from {{start_time}} to the end of the file and save it as {{output_name}} in {{output_dir}}. Keep everything — quality, GPS, the works.",
+      "parameters": {
+        "source_path": "/mnt/testdata/GX010099.MP4",
+        "start_time": "4:30",
+        "output_name": "TailClip.MP4",
+        "output_dir": "/tmp/output/"
+      },
+      "expected_output": "TailClip.MP4 created with stream copy from keyframe at or after 4:30 to end of file, GPMF preserved, timestamps patched.",
+      "files": [],
+      "assertions": [
+        "Uses ffmpeg -c copy",
+        "Probes for nearby keyframes and snaps the start to the first keyframe at or after 4:30",
+        "Omits -to entirely to copy to end of file rather than guessing a duration",
+        "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd",
+        "Runs exiftool with -TrackCreateDate and -MediaCreateDate to fix timestamps",
+        "Runs a full ffmpeg decode pass on the exported video and audio streams",
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     }

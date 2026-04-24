@@ -39,9 +39,11 @@ If multiple chapters exist, concatenate with the ffmpeg concat demuxer:
 # Create a file list
 for f in GX*0001.MP4; do echo "file '$f'"; done > chapters.txt
 
-# Concatenate (stream copy — no re-encode)
-ffmpeg -f concat -safe 0 -i chapters.txt -c copy -map 0:0 -map 0:1 -map 0:3 full_recording.MP4
+# Concatenate all streams (stream copy — no re-encode)
+ffmpeg -f concat -safe 0 -i chapters.txt -c copy full_recording.MP4
 ```
+
+Chapters must appear in the file list in numerical order (GX01, GX02, GX03...). The glob `GX*NNNN.MP4` produces correct order when all chapters are in the same directory.
 
 Use `full_recording.MP4` as the source for all subsequent steps. If only one chapter exists, proceed directly.
 
@@ -110,10 +112,11 @@ Check ffmpeg's exit status after each cut. If non-zero, investigate before proce
 
 ```bash
 # Segment 1: 0 to keyframe boundary (e.g. 155.155s)
+# -to is a duration here, but equals the absolute time only because -ss is 0
 ffmpeg -y -ss 0 -i source.MP4 \
   -to 155.155 \
   -map 0:0 -map 0:1 -map 0:3 \
-  -c copy \
+  -c copy -avoid_negative_ts make_zero \
   Segment1.MP4
 
 # Segment 2: keyframe boundary to end
@@ -122,13 +125,17 @@ ffmpeg -y -ss 0 -i source.MP4 \
 ffmpeg -y -ss 155.155 -i source.MP4 \
   -to 223.223 \
   -map 0:0 -map 0:1 -map 0:3 \
-  -c copy \
+  -c copy -avoid_negative_ts make_zero \
   Segment2.MP4
 ```
 
 **Why `-ss` before `-i`:** Fast input seeking — jumps directly to the keyframe, no decode overhead.
 
 **Why `-to` is a duration here:** When `-ss` is an input option, `-to` on the output is relative to the seek point, not the original file start.
+
+**Last segment to end of file:** If the final segment should run to the end, omit `-to` entirely — ffmpeg will copy to the end of the source.
+
+**Negative DTS prevention:** Add `-avoid_negative_ts make_zero` to each ffmpeg cut command. Stream-copied segments starting mid-file can have negative DTS values that cause playback glitches in some players.
 
 ## Step 4 — Fix timestamps
 
@@ -186,7 +193,7 @@ ffmpeg -v error -ss 0 -i source.MP4 \
   -map 0:0 -map 0:1 -map 0:3 \
   -c copy -f streamhash -hash sha256 -
 
-# Exported segment 1
+# Exported segment 1 — gpmd is at index 0:2 (not 0:3) because tmcd was excluded
 ffmpeg -v error -i Segment1.MP4 \
   -map 0:0 -map 0:1 -map 0:2 \
   -c copy -f streamhash -hash sha256 -
