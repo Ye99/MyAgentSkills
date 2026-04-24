@@ -54,7 +54,7 @@ Before cutting, verify the stream layout and capture the recording timestamp. If
 ```bash
 ffprobe -v quiet \
   -show_entries stream=index,codec_name,codec_type,codec_tag_string \
-  -of json <source.MP4>
+  -of json source.MP4
 ```
 
 Typical GoPro stream layout:
@@ -69,7 +69,7 @@ Typical GoPro stream layout:
 Also grab the source creation time — you'll need it to set correct timestamps on each segment:
 
 ```bash
-exiftool -api largefilesupport=1 <source.MP4> | grep "Create Date"
+exiftool -api largefilesupport=1 source.MP4 | grep "Create Date"
 ```
 
 ## Step 2 — Find keyframe boundaries (required)
@@ -161,7 +161,7 @@ GoPro timestamps are UTC. Add the segment's start offset in seconds to the sourc
 ## Step 5 — Verify
 
 ```bash
-exiftool -api largefilesupport=1 <output.MP4> \
+exiftool -api largefilesupport=1 output.MP4 \
   | grep -E "Create Date|Modify Date|Meta Format|Duration|Avg Bitrate"
 ```
 
