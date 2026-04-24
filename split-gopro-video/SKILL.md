@@ -49,7 +49,7 @@ Use `full_recording.MP4` as the source for all subsequent steps. If only one cha
 
 ## Step 1 — Probe the source
 
-Before cutting, verify the stream layout and capture the recording timestamp:
+Before cutting, verify the stream layout and capture the recording timestamp. If you concatenated chapters in Step 0, probe the concatenated file — not an individual chapter — since stream indices may differ after concatenation.
 
 ```bash
 ffprobe -v quiet \
@@ -83,7 +83,7 @@ Use a ±15 second window around the target time. GoPro keyframe intervals are ty
 ffprobe -select_streams v \
   -read_intervals "00:02:20%00:02:50" \
   -show_frames \
-  ~/source.MP4 2>/dev/null | \
+  source.MP4 2>/dev/null | \
   awk '/key_frame=1/{kf=1} kf && /best_effort_timestamp_time/{print $0; kf=0}'
 ```
 
@@ -156,7 +156,7 @@ exiftool -api largefilesupport=1 \
 
 Using only `-AllDates` is not enough — it covers `mvhd` but leaves `tkhd`/`mdhd` zeroed. All five flags are needed.
 
-GoPro timestamps are UTC. Add seconds to get each segment's start time (e.g., a segment starting at 2:35 = 155 s after the source create date).
+GoPro timestamps are UTC. Add the segment's start offset in seconds to the source create date. For example, if the source Create Date is `2024:03:15 14:30:00` and a segment starts at 155s, its timestamp is `2024:03:15 14:32:35`.
 
 ## Step 5 — Verify
 
@@ -168,6 +168,7 @@ exiftool -api largefilesupport=1 <output.MP4> \
 **What to expect:**
 - All date fields show the correct recording time (not `0000:00:00`)
 - `Meta Format: gpmd` — GPMF/GPS track is present
+- `Duration` is within ~2 seconds of the expected keyframe-to-keyframe span — a significantly shorter duration indicates silent truncation
 - `Avg Bitrate` will read higher than the source (~100 Mbps vs ~70 Mbps) — this is normal for shorter clips due to MP4 container overhead math; the actual encoded frames are untouched
 
 **Full ffmpeg decode-pass validation for exported clips:**
@@ -224,6 +225,8 @@ Treat `udta` restoration as out of scope for this skill unless you are using a d
 | Running exiftool on the source file instead of the exported segments | Never modify the source — only patch timestamps on output segments |
 | Processing only the first chapter of a multi-chapter recording | Check for `GX02*`, `GX03*`, etc. and concatenate all chapters before splitting |
 | Not checking ffmpeg exit status before proceeding | A non-zero exit means a partial or corrupt output — investigate before patching timestamps |
+| Using the source filename as the output path with `-y` | `-y` overwrites without confirmation — always use a distinct output filename to avoid destroying the source |
+| Filename starts with `GX02` or higher but not checking for other chapters | `GX02` means chapter 2 — check for `GX01*`, `GX03*`, etc. of the same recording ID before proceeding with a single file |
 
 ## What is not preserved
 

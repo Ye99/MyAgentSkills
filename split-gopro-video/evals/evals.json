@@ -27,7 +27,8 @@
         "Does not attempt raw Python udta injection or other byte-splice metadata copying",
         "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
         "Checks ffmpeg exit status after each cut before proceeding to timestamp patching",
-        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues",
+        "Verifies output duration is within ~2 seconds of the expected keyframe-to-keyframe span to detect silent truncation"
       ]
     },
     {
@@ -53,7 +54,8 @@
         "Does not attempt raw Python udta injection or other byte-splice metadata copying",
         "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
         "Checks ffmpeg exit status after each cut before proceeding to timestamp patching",
-        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues"
+        "Uses -avoid_negative_ts make_zero in ffmpeg cut commands to prevent negative DTS playback issues",
+        "Notices the GX02 prefix means chapter 2 and checks for other chapters (GX010045, GX030045, etc.) of the same recording before proceeding"
       ]
     },
     {
