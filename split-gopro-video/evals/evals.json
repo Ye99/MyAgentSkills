@@ -24,7 +24,9 @@
         "Output files contain gpmd meta format (GPMF GPS track present)",
         "Runs a full ffmpeg decode pass on the exported video and audio streams to catch container corruption or playback failures",
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
-        "Does not attempt raw Python udta injection or other byte-splice metadata copying"
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying",
+        "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
       ]
     },
     {
@@ -47,7 +49,9 @@
         "Runs exiftool to fix timestamps on the output",
         "Runs a full ffmpeg decode pass on the exported video and audio streams to catch container corruption or playback failures",
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between the source cut range and the exported clip",
-        "Does not attempt raw Python udta injection or other byte-splice metadata copying"
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying",
+        "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
       ]
     },
     {
@@ -78,6 +82,35 @@
         "Excludes the tmcd stream from each output",
         "Runs a full ffmpeg decode pass on each exported video and audio stream to catch container corruption or playback failures",
         "Can verify supported-stream preservation by comparing streamhash output for video, audio, and gpmd between each source cut range and exported clip",
+        "Does not attempt raw Python udta injection or other byte-splice metadata copying",
+        "Uses exact best_effort_timestamp_time values from ffprobe output as ffmpeg -ss values without rounding or reformatting",
+        "Checks ffmpeg exit status after each cut before proceeding to timestamp patching"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I have a long GoPro recording that spans multiple files: {{chapter1}}, {{chapter2}}, and {{chapter3}} in {{source_dir}}. I want to extract from {{start_time}} to {{end_time}} as {{output_name}} in {{output_dir}}. Keep full quality and GPS.",
+      "parameters": {
+        "source_dir": "/mnt/testdata/DCIM/100GOPRO/",
+        "chapter1": "GX010042.MP4",
+        "chapter2": "GX020042.MP4",
+        "chapter3": "GX030042.MP4",
+        "start_time": "3:00",
+        "end_time": "18:00",
+        "output_name": "FullDrive.MP4",
+        "output_dir": "/tmp/output/"
+      },
+      "expected_output": "All three chapters concatenated into a single source, then the requested time range extracted with stream copy, keyframe alignment, GPMF preserved, and timestamps patched.",
+      "files": [],
+      "assertions": [
+        "Detects and concatenates all three chapters (GX01*, GX02*, GX03*) before splitting",
+        "Uses ffmpeg concat demuxer with -c copy for chapter concatenation (no re-encode)",
+        "Uses the concatenated file as the source for keyframe probing and cutting",
+        "Maps the probed video/audio/gpmd streams explicitly and excludes tmcd",
+        "Uses ffmpeg -c copy for the final segment extraction",
+        "Probes for nearby keyframes and snaps boundaries to keyframes at or after the requested times",
+        "Runs exiftool with -TrackCreateDate and -MediaCreateDate to fix timestamps",
+        "Runs a full ffmpeg decode pass on the exported video and audio streams",
         "Does not attempt raw Python udta injection or other byte-splice metadata copying"
       ]
     }
