@@ -24,6 +24,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **virsh-delete-and-flatten-snapshots** ([`virsh-delete-and-flatten-snapshots/SKILL.md`](virsh-delete-and-flatten-snapshots/SKILL.md)): Remove libvirt external snapshot records or retire all restore points and reclaim QEMU/KVM overlay disk space with deterministic helper-script execution.
 - **split-gopro-video** ([`split-gopro-video/SKILL.md`](split-gopro-video/SKILL.md)): Split GoPro HEVC MP4 files into named time-range segments with full fidelity — original bitrate, GPMF/GPS track, camera metadata, and accurate timestamps all preserved.
 - **virsh-vm-snapshots** ([`virsh-vm-snapshots/SKILL.md`](virsh-vm-snapshots/SKILL.md)): Manage external-only QEMU/KVM VM snapshots with `virsh` for UEFI-compatible backup workflows.
+- **proxmox-cross-host-migration** ([`proxmox-cross-host-migration/SKILL.md`](proxmox-cross-host-migration/SKILL.md)): Move, copy, migrate, or restore QEMU VMs, CTs, and LXC containers between standalone Proxmox VE/PVE node hosts over SSH with `vzdump`/`qmrestore`/`pct restore`, preserving VMIDs, MAC addresses, and guest config while handling VMID collisions, the PVE 9.1.x unprivileged-LXC stdin-restore quirk, `--unique` MAC safety, linked clones, and templates.
 
 ## AI agent rules
 
