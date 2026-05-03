@@ -5,8 +5,8 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 
 - **add-google-models-to-opencode** ([`add-google-models-to-opencode/SKILL.md`](add-google-models-to-opencode/SKILL.md)): Add or update Google provider models in the opencode.json configuration.
 - **dedup-copy** ([`dedup-copy/SKILL.md`](dedup-copy/SKILL.md)): Copy files from a source to a destination while eliminating content-identical duplicates via jdupes, with scored keeper selection, JSON logging, and independent verification.
-- **convert-external-images** ([`convert-external-images/SKILL.md`](convert-external-images/SKILL.md)): Convert external image files in Obsidian markdown to embedded base64 data URLs with clean reference-style syntax.
 - **create_mcp_ext_apps** ([`create_mcp_ext_apps/SKILL.md`](create_mcp_ext_apps/SKILL.md)): Build MCP ext-apps using a reference architecture with reusable transport, registration, and UI runtime patterns.
+- **extract-embedded-images** ([`extract-embedded-images/SKILL.md`](extract-embedded-images/SKILL.md)): Move embedded base64 markdown images into a sibling assets folder and rewrite references as Obsidian wiki-link image embeds.
 - **format-markdownfile-code-block** ([`format-markdownfile-code-block/SKILL.md`](format-markdownfile-code-block/SKILL.md)): Normalize Markdown notes so command/code lines are easy to read.
 - **find-missing-files** ([`find-missing-files/SKILL.md`](find-missing-files/SKILL.md)): Find files present in a source directory that are missing from a destination directory, compared by content hash rather than filename.
 - **AI-folder-poi-itinerary-rename** ([`AI-folder-poi-itinerary-rename/SKILL.md`](AI-folder-poi-itinerary-rename/SKILL.md)): Rename day-based media folders with AI-selected itinerary landmarks from EXIF GPS clusters, preserving chronological order with resumable state and failure diagnostics.
