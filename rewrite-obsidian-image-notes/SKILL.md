@@ -3,7 +3,8 @@ name: rewrite-obsidian-image-notes
 description: >-
   Use when an Obsidian Markdown note embeds a pasted image that primarily
   contains text, tables, lists, slides, diagrams, or screenshots, and the user
-  wants the note rewritten so the image content becomes editable Markdown.
+  wants the image replaced by editable Markdown rather than kept as the primary
+  source.
 ---
 
 # Rewrite Obsidian Image Notes
@@ -11,6 +12,19 @@ description: >-
 Use this skill when a note relies on an embedded screenshot or pasted image for
 important content and the user wants that content represented directly in the
 Markdown note.
+
+If the user wants to keep or externalize the image and also add OCR/transcribed
+text beside it, use `externalize-image-and-extract-text` instead. If the note
+contains base64 `data:image/...` definitions and the user only wants assets
+extracted, use `extract-embedded-images` instead.
+
+## Choose the Right Skill
+
+| Scenario | Use |
+| --- | --- |
+| Note contains `[ref]: <data:image/...;base64,...>` and the user only wants assets extracted | `extract-embedded-images` |
+| Note embeds an image and the user wants the image replaced by editable Markdown | `rewrite-obsidian-image-notes` |
+| User wants to keep/externalize the image and also add its text to the note | `externalize-image-and-extract-text` |
 
 ## Workflow
 

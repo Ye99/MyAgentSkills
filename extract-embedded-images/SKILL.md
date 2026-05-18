@@ -3,9 +3,9 @@ name: extract-embedded-images
 description: >-
   Use when a markdown note has embedded base64 image data URLs and the user wants
   them extracted into a sibling assets folder, with Obsidian wiki-link image
-  embeds replacing reference-style inline images. Triggers on requests like
-  "extract embedded images", "move base64 images to assets folder",
-  "externalize base64 images", or "make this note easier to edit".
+  embeds replacing reference-style inline images, without OCR or transcription.
+  Trigger on requests like "extract embedded images", "move base64 images to
+  assets folder", or "externalize base64 images".
 ---
 
 # Extract Embedded Images
@@ -19,6 +19,19 @@ Inverse of `convert-external-images`. Use when a markdown note has grown unwield
 - The user wants the note to load fast in an editor or to diff cleanly in git.
 
 This skill is the preferred replacement for `convert-external-images` for users who have decided embedded base64 hurts more than it helps (slow editor load, large diffs, hard to swap an image).
+
+If the user also asks to OCR, transcribe, or put image text into the note during
+conversion, use `externalize-image-and-extract-text` instead. If the user wants
+an existing image embed replaced by editable Markdown, use
+`rewrite-obsidian-image-notes` instead.
+
+## Choose the Right Skill
+
+| Scenario | Use |
+| --- | --- |
+| Note contains `[ref]: <data:image/...;base64,...>` and the user only wants assets extracted | `extract-embedded-images` |
+| Note embeds an image and the user wants the image replaced by editable Markdown | `rewrite-obsidian-image-notes` |
+| User wants to keep/externalize the image and also add its text to the note | `externalize-image-and-extract-text` |
 
 ## What it produces
 
