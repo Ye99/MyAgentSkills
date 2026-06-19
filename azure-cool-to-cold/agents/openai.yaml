@@ -1,0 +1,4 @@
+interface:
+  display_name: "Azure Cool to Cold"
+  short_description: "Safely retier Azure containers from Cool to Cold"
+  default_prompt: "Use $azure-cool-to-cold to preflight, convert, and verify one Azure Blob container from Cool to Cold."
