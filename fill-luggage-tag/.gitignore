@@ -1,0 +1,9 @@
+# Blanket-ignore PDFs for PII safety; use `git add -f` only for sanitized fixtures.
+*.pdf
+*.png
+*.gif
+*answers*.json
+*fields*.json
+tmp/
+__pycache__/
+.pytest_cache/
