@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fill Luggage Tag"
+  short_description: "Fill printable luggage tag PDFs"
+  default_prompt: "Fill a printable luggage tag PDF while preserving print scale."
