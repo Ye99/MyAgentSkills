@@ -75,10 +75,10 @@ If the user only has a browser page or printable tag page, ask them to create th
 
 ```json
 [
-  {"label": "Name", "page": 0, "x": 232, "y": 371.2, "font_size": 9.5},
-  {"label": "Address", "page": 0, "x": 240, "y": 357.3, "font_size": 9.5},
-  {"label": "Address", "page": 0, "x": 240, "y": 343.8, "font_size": 9.5},
-  {"label": "Telephone", "page": 0, "x": 246, "y": 316.6, "font_size": 9.5}
+  {"label": "Name", "page": 0, "x": 232, "y": 371.2, "font_size": 9.6},
+  {"label": "Address", "page": 0, "x": 240, "y": 357.3, "font_size": 9.6},
+  {"label": "Address", "page": 0, "x": 240, "y": 343.8, "font_size": 9.6},
+  {"label": "Telephone", "page": 0, "x": 246, "y": 316.6, "font_size": 9.6}
 ]
 ```
 
@@ -94,10 +94,10 @@ These formulas assume a zero-origin page with `CropBox` equal to `MediaBox`. The
 Use `max_width` on a field when long text must shrink to fit a line:
 
 ```json
-{"label": "Address", "page": 0, "x": 240, "y": 357.3, "font_size": 9.5, "max_width": 250}
+{"label": "Address", "page": 0, "x": 240, "y": 357.3, "font_size": 9.6, "max_width": 250}
 ```
 
-The default overlay font is `Helvetica-Bold`, a ReportLab base PDF font. The helper rejects characters that this font would draw with fallback glyphs, such as many CJK/Cyrillic names and characters such as U+0141. If the tag must contain broader Unicode text, configure an embedded Unicode font before filling.
+The default overlay font is `Helvetica-Bold` at `9.6` points, a ReportLab base PDF font. Use `9.6` points for hand-measured fields unless visual QA shows the text must shrink to fit a specific line. The helper rejects characters that this font would draw with fallback glyphs, such as many CJK/Cyrillic names and characters such as U+0141. If the tag must contain broader Unicode text, configure an embedded Unicode font before filling.
 
 ## Scale Preservation Checks
 

@@ -17,7 +17,7 @@ from reportlab.pdfgen import canvas
 
 
 DEFAULT_FONT = "Helvetica-Bold"
-DEFAULT_FONT_SIZE = 9.5
+DEFAULT_FONT_SIZE = 9.6
 BOX_TOLERANCE = 0.001
 
 

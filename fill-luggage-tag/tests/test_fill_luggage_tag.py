@@ -103,6 +103,7 @@ def test_inspect_pdf_finds_luggage_tag_labels(tmp_path):
     assert all(field["page"] == 0 for field in result["fields"])
     assert all(field["x"] > 190 for field in result["fields"])
     assert all(field["y"] > 300 for field in result["fields"])
+    assert all(field["font_size"] == 9.6 for field in result["fields"])
 
 
 def test_inspect_pdf_warns_about_geometry_fill_will_reject(tmp_path):
@@ -433,4 +434,6 @@ def test_skill_documents_default_font_character_limit():
     text = skill_md.read_text(encoding="utf-8")
 
     assert "Helvetica-Bold" in text
+    assert "`9.6` points" in text
+    assert '"font_size": 9.6' in text
     assert "embedded Unicode font" in text
