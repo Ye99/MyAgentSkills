@@ -55,3 +55,17 @@ If you hit an `SSE read timed out` error, retry the failed step once before doin
 ## Python Tests
 
 Prefer `pytest` over `unittest` for Python tests. It provides fixtures and cleaner temporary-directory handling with less boilerplate.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `Ye99/MyAgentSkills`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, using their default label strings. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
