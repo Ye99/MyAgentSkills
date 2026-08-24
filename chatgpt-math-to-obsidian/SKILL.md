@@ -41,7 +41,8 @@ python3 scripts/fix_chatgpt_math.py note.md           # rewrite in place
 ```
 
 Always run `--check` first and read the diff. The script is idempotent: a second run
-produces no further changes.
+produces no further changes, and it is safe to re-run on a note that has already been
+converted and then edited — the usual case when a note grows by repeated pasting.
 
 ## Conversion Rules
 
@@ -52,6 +53,15 @@ produces no further changes.
 3. **Trailing two-space markdown hard breaks are stripped inside math blocks only.** They are
    invisible to MathJax and make the source noisy. Prose keeps its hard breaks.
 4. Multi-line formula bodies keep every line; MathJax treats the newlines as spaces.
+5. **A collapsed row separator is restored.** ChatGPT renders the LaTeX `\\` that ends a
+   `bmatrix` row as a single trailing backslash plus a hard break. Stripping the break under
+   rule 3 would leave `a\`, which is not a row separator and silently breaks the matrix, so
+   the second backslash is put back whenever the break hid an odd number of them.
+6. **Existing `$...$` spans are math, not prose.** Neither the parentheses inside them nor a
+   prose `(...)` wrapped around one is rewritten. This is what makes re-runs safe.
+7. **An unclosed `$$` is a typo, not a block.** Entering display mode on it would strip the
+   markdown hard breaks from every remaining line of the note, so a `$$` with no closing
+   partner is left as ordinary text.
 
 ## Guardrails (why the naive one-liner fails)
 
@@ -65,16 +75,44 @@ produces no further changes.
 - **Leave unclosed or non-LaTeX brackets alone** rather than guessing.
 - **Never drop content.** Verify with `git diff` that only delimiters and trailing spaces moved,
   and that the line count is unchanged.
+- **Re-running must never corrupt.** The tool has to be a fixed point on its own output. The
+  regression that motivated rules 6 and 7: `$H^{(\ell-1)}$ (shape: $[n, d]$)` became
+  `$H^{$\ell-1$}$ $shape: $[n, d]$$` on the second run, because the inline rule saw the LaTeX
+  inside an already-converted span. Note that neither a character-preservation check nor an
+  idempotency check detects this class of damage — only the tests do. Keep them green.
 
 ## Verification
 
 ```bash
-python3 -m pytest tests -q                  # 22 cases: conversion, guardrails, idempotency, CLI
+python3 -m pytest tests -q                  # 35 cases: conversion, guardrails, re-run safety, CLI
+                                            # (no pytest? python3 -m venv .venv && .venv/bin/pip install pytest)
 git diff --stat note.md                     # line count must be unchanged
 git diff note.md                            # every hunk should be a delimiter swap only
 ```
 
 Then open the note in Obsidian and confirm the formulas render.
+
+## Paste Artifacts This Tool Deliberately Does Not Fix
+
+These need a human decision, because repairing them means supplying content that is not in the
+file. Fix them by hand after running the script, then re-run `--check` to confirm it is clean.
+
+- **`# [` at the start of a formula.** A lone `=` line under text is a Markdown *setext*
+  heading, so a formula pasted as `[` / `H^{(l)}` / `=` / `\begin{bmatrix}` gets normalized to
+  an ATX heading and the `=` is swallowed:
+
+  ```
+  # [
+  H^{(l)}
+
+  \begin{bmatrix}
+  ```
+
+  Restore the `=`, drop the `#`, and wrap in `$$`. The script leaves these alone because
+  guessing where the `=` went is inventing content.
+- **A lone `$` in prose** (currency, shell variables) is read as the start of a math span and
+  can shield the rest of the line from conversion. It is never corrupted, just skipped —
+  convert that formula by hand.
 
 ## Applying by Hand
 

@@ -107,3 +107,93 @@ def test_display_block_at_file_start_and_end_without_trailing_newline():
 
 def test_inline_whitespace_inside_delimiters_is_trimmed():
     assert convert("value ( \\theta ) here\n") == "value $\\theta$ here\n"
+
+
+# --- Re-run safety -----------------------------------------------------------
+# The note these skills run on is edited and re-converted repeatedly, so
+# convert() must be a no-op on its own output. Existing `$...$` spans are
+# math, not prose: neither the parentheses inside them nor the prose
+# parentheses around them may be rewritten.
+
+def test_parens_inside_existing_inline_math_are_left_alone():
+    src = "Input: $H^{(\\ell-1)}$ here\n"
+    assert convert(src) == src
+
+
+def test_prose_parens_wrapping_inline_math_are_left_alone():
+    src = "shape (really: $d_{\\text{model}}$) ok\n"
+    assert convert(src) == src
+
+
+def test_left_right_parens_inside_inline_math_are_left_alone():
+    src = "$\\text{softmax}\\left(\\frac{a}{b}\\right)V_1$\n"
+    assert convert(src) == src
+
+
+def test_multiple_math_spans_and_prose_parens_on_one_line():
+    src = "$H^{(\\ell)}$ (shape: $[n, d_{\\text{model}}]$) and (plain) text\n"
+    assert convert(src) == src
+
+
+def test_inline_conversion_still_happens_beside_existing_math():
+    src = "$\\theta$ and (Q_{\\text{it}}) here\n"
+    assert convert(src) == "$\\theta$ and $Q_{\\text{it}}$ here\n"
+
+
+def test_idempotent_on_realistic_converted_prose():
+    src = (
+        "Input: $H^{(\\ell-1)}$ (shape: $[n, d_{\\text{model}}]$)\n"
+        "\n"
+        "$$\nP(\\text{next token}\\mid \\text{context})\n$$\n"
+        "\n"
+        "- Often $d_{head} = \\frac{d_{\\text{model}}}{h}$.\n"
+    )
+    once = convert(src)
+    assert once == src
+    assert convert(once) == once
+
+
+# --- Unclosed `$$` must not eat the rest of the file -------------------------
+
+def test_unclosed_dollar_block_does_not_strip_hard_breaks():
+    """A stray `$$` must not turn the remainder of the note into display math."""
+    src = "Intro.\n\n$$\nx = 1\n\nprose hard break  \nsecond line  \nend\n"
+    assert convert(src) == src
+
+
+def test_closed_dollar_block_still_trims_its_own_hard_breaks():
+    src = "$$\nx = 1  \n$$\n\nprose  \n"
+    assert convert(src) == "$$\nx = 1\n$$\n\nprose  \n"
+
+
+# --- Collapsed `\\` row separators -------------------------------------------
+# ChatGPT renders a LaTeX row separator `\\` as a single `\` followed by a
+# markdown hard break. Stripping the hard break without restoring the second
+# backslash leaves `a\`, which is not a row separator and breaks the matrix.
+
+def test_collapsed_row_separator_is_restored():
+    src = "[  \n\\begin{bmatrix}  \na\\  \nb\\  \nc  \n\\end{bmatrix}  \n]\n"
+    assert convert(src) == (
+        "$$\n\\begin{bmatrix}\na\\\\\nb\\\\\nc\n\\end{bmatrix}\n$$\n"
+    )
+
+
+def test_intact_row_separator_is_left_alone():
+    src = "[  \n\\alpha\\\\  \n\\beta  \n]\n"
+    assert convert(src) == "$$\n\\alpha\\\\\n\\beta\n$$\n"
+
+
+def test_row_separator_repair_is_idempotent():
+    src = "[  \n\\alpha\\  \n\\beta  \n]\n"
+    once = convert(src)
+    assert convert(once) == once
+
+
+def test_row_separator_repair_applies_inside_existing_dollar_blocks():
+    src = "$$\na\\  \nb\n$$\n"
+    assert convert(src) == "$$\na\\\\\nb\n$$\n"
+
+
+def test_trailing_backslash_outside_math_is_untouched():
+    src = "curl http://localhost:11434/api/embeddings \\\n  -d '{}'\n"
+    assert convert(src) == src
