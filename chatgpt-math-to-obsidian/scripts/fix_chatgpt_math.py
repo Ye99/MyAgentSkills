@@ -24,7 +24,11 @@ CLOSE_DISPLAY = re.compile(r"^\s*\\?\]\s*$")
 
 # `(...)`, or an escaped `\( ... \)`, whose contents look like LaTeX.
 INLINE = re.compile(r"\\?\(([^()\n]*?)\\?\)")
-CODE_SPAN = re.compile(r"`[^`\n]*`")
+# Regions the inline rule must not touch: code spans, and math that is already
+# converted. A `$...$` span is math, so its parentheses belong to the formula,
+# and a prose `(...)` wrapping one must not be swallowed either. Without this,
+# a second run over a converted note rewrites `$H^{(\ell)}$` into `$H^{$\ell$}$`.
+PROTECTED = re.compile(r"`[^`\n]*`|\$[^$\n]+\$")
 
 
 def _looks_like_latex(text: str) -> bool:
@@ -32,10 +36,10 @@ def _looks_like_latex(text: str) -> bool:
 
 
 def _convert_inline(line: str) -> str:
-    """Rewrite inline math in `line`, leaving inline code spans alone."""
+    """Rewrite inline math in `line`, leaving protected regions alone."""
     out = []
     pos = 0
-    for span in CODE_SPAN.finditer(line):
+    for span in PROTECTED.finditer(line):
         out.append(INLINE.sub(_inline_sub, line[pos:span.start()]))
         out.append(span.group(0))
         pos = span.end()
@@ -78,21 +82,25 @@ def convert(text: str) -> str:
                 in_display = False
                 out.append("$$")
             else:
-                out.append(line.rstrip())
+                out.append(_trim_math_line(line))
             i += 1
             continue
 
         if line.strip() == "$$":
-            in_display = True
-            out.append("$$")
-            i += 1
-            continue
+            if _has_closing_display(lines, i + 1):
+                in_display = True
+                out.append("$$")
+                i += 1
+                continue
+            # A stray, unclosed `$$` is a typo, not a math block. Treating it as
+            # one would rstrip every remaining line and silently destroy the
+            # markdown hard breaks in the rest of the note.
 
         if OPEN_DISPLAY.match(line):
             body, end = _read_display_body(lines, i + 1)
             if end is not None and any(_looks_like_latex(b) for b in body):
                 out.append("$$")
-                out.extend(b.rstrip() for b in body)
+                out.extend(_trim_math_line(b) for b in body)
                 out.append("$$")
                 i = end + 1
                 continue
@@ -101,6 +109,25 @@ def convert(text: str) -> str:
         i += 1
 
     return "\n".join(out)
+
+
+def _trim_math_line(line: str) -> str:
+    """Strip a markdown hard break from a line of math.
+
+    ChatGPT renders the LaTeX row separator `\\\\` as a single trailing
+    backslash plus a two-space hard break, so removing the break naively leaves
+    `a\\`, which is not a row separator and breaks the matrix. Restore the
+    second backslash whenever the break hid an odd number of them.
+    """
+    stripped = line.rstrip()
+    if stripped != line and (len(stripped) - len(stripped.rstrip("\\"))) % 2:
+        stripped += "\\"
+    return stripped
+
+
+def _has_closing_display(lines, start):
+    """True when a later line closes a `$$` block opened at `start - 1`."""
+    return any(line.strip() == "$$" for line in lines[start:])
 
 
 def _read_display_body(lines, start):
