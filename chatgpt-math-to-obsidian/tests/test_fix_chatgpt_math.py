@@ -197,3 +197,110 @@ def test_row_separator_repair_applies_inside_existing_dollar_blocks():
 def test_trailing_backslash_outside_math_is_untouched():
     src = "curl http://localhost:11434/api/embeddings \\\n  -d '{}'\n"
     assert convert(src) == src
+
+
+# --- Marker-less display bodies ----------------------------------------------
+# ChatGPT emits plenty of display math with no `\command` and no `_{`/`^{`
+# group: `n=11`, `128K-103K=25K`. The bracket-pair structure is already strong
+# evidence of math, so a body made only of symbols and digits qualifies even
+# without a LaTeX marker. Prose in brackets still must not.
+
+def test_marker_less_arithmetic_body_is_converted():
+    assert convert("[  \nn=11  \n]\n") == "$$\nn=11\n$$\n"
+
+
+def test_marker_less_body_with_grouped_digits():
+    assert convert("[  \nn=100,000  \n]\n") == "$$\nn=100,000\n$$\n"
+
+
+def test_marker_less_multi_term_arithmetic():
+    src = "[  \n2K+20K+80K+1K=103K  \n]\n"
+    assert convert(src) == "$$\n2K+20K+80K+1K=103K\n$$\n"
+
+
+@pytest.mark.parametrize("src", [
+    "[\nplain text in brackets\n]\n",
+    "[\n- item one\n- item two\n]\n",
+    "[\nsee the docs\n]\n",
+])
+def test_prose_in_brackets_is_still_untouched(src):
+    """A word of three or more letters means prose, not a formula."""
+    assert convert(src) == src
+
+
+def test_marker_less_conversion_is_idempotent():
+    once = convert("[  \nn=11  \n]\n")
+    assert convert(once) == once
+
+
+# --- `# [` setext-heading artifact -------------------------------------------
+# A formula pasted as `[` / `H^{(30)}` / `=` / body / `]` is normalized by the
+# markdown renderer into an ATX heading: the `=` is a setext underline, so it is
+# swallowed and `# ` is prepended. The underline character is determined by the
+# heading level, so restoring `=` reconstructs rather than invents.
+
+def test_setext_artifact_is_repaired():
+    src = "# [  \nH^{(30)}\n\n\\begin{bmatrix}  \na\\  \nb  \n\\end{bmatrix}  \n]\n"
+    assert convert(src) == (
+        "$$\nH^{(30)}\n=\n\\begin{bmatrix}\na\\\\\nb\n\\end{bmatrix}\n$$\n"
+    )
+
+
+def test_setext_body_may_contain_a_literal_bracketed_vector():
+    """Depth tracking: the inner `]` must not be mistaken for the block's end."""
+    src = "# [  \nh_{\\text{cat}}\n\n[  \n0.72  \n]  \n]\n"
+    assert convert(src) == "$$\nh_{\\text{cat}}\n=\n[\n0.72\n]\n$$\n"
+    assert convert(src).count("\n") == src.count("\n")
+
+
+def test_setext_repair_is_idempotent():
+    src = "# [  \nH^{(30)}\n\n\\begin{bmatrix}  \na  \n\\end{bmatrix}  \n]\n"
+    once = convert(src)
+    assert convert(once) == once
+
+
+@pytest.mark.parametrize("src", [
+    "### [Building effective agents](https://example.com)\n",
+    "## [MCP](https://modelcontextprotocol.io/introduction)\n",
+    "# [a link](https://example.com) in a heading\n",
+])
+def test_headings_containing_links_are_untouched(src):
+    """The `[` must be alone on the heading line; a link heading is not math."""
+    assert convert(src) == src
+
+
+def test_heading_bracket_without_latex_body_is_untouched():
+    src = "# [  \nsome words\n\nmore prose\n]\n"
+    assert convert(src) == src
+
+
+# --- Lost-backslash spacing commands -----------------------------------------
+# `0.72,\;` loses its backslash in the paste and arrives as `0.72,;`. The
+# surviving character identifies the command that lost the backslash, so the
+# repair is determined, not guessed.
+
+def test_lost_backslash_thin_space_is_restored():
+    assert convert("$$\n0.72,,\n$$\n") == "$$\n0.72,\\,\n$$\n"
+
+
+def test_lost_backslash_thick_space_is_restored():
+    src = "$$\nQ_{\\text{new}}K_1^T,;\n$$\n"
+    assert convert(src) == "$$\nQ_{\\text{new}}K_1^T,\\;\n$$\n"
+
+
+def test_lost_backslash_medium_space_is_restored():
+    assert convert("$$\na,:\n$$\n") == "$$\na,\\:\n$$\n"
+
+
+def test_lost_backslash_repair_applies_in_converted_display_blocks():
+    assert convert("[  \n\\ldots,,  \n]\n") == "$$\n\\ldots,\\,\n$$\n"
+
+
+def test_lost_backslash_repair_is_idempotent():
+    once = convert("$$\n0.72,,\n$$\n")
+    assert convert(once) == once
+
+
+def test_spacing_repair_does_not_touch_prose():
+    src = "Wait, ; that is odd, , really.\n"
+    assert convert(src) == src
