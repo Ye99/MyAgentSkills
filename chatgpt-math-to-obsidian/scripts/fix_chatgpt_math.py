@@ -22,6 +22,25 @@ FENCE = re.compile(r"^\s*(?:```|~~~)")
 OPEN_DISPLAY = re.compile(r"^\s*\\?\[\s*$")
 CLOSE_DISPLAY = re.compile(r"^\s*\\?\]\s*$")
 
+# A formula body with no LaTeX marker at all: `n=11`, `128K-103K=25K`. A bare
+# `[` / `]` pair is already strong evidence of display math, so an operator or a
+# digit is enough -- but a word of three or more letters means prose, not a
+# formula, and prose in brackets must stay untouched.
+MATH_SIGN = re.compile(r"[=+\-*/^<>]|\d")
+PROSE_WORD = re.compile(r"[A-Za-z]{3,}")
+
+# `[` alone on an ATX heading line. A formula pasted as `[` / `H^{(30)}` / `=` /
+# body / `]` has its `=` read as a setext underline: the renderer swallows it and
+# prepends `# `. The underline character follows from the heading level, so the
+# `=` is reconstructed, not guessed. Only `#` (whose underline is `=`) qualifies;
+# a heading that merely starts a markdown link is not math.
+SETEXT_OPEN = re.compile(r"^#[ \t]+\\?\[\s*$")
+
+# A LaTeX spacing command that lost its backslash in the paste: `0.72,\;`
+# arrives as `0.72,;`. The surviving character names the command, so this too is
+# determined rather than guessed.
+LOST_SPACING = re.compile(r",([,;:])")
+
 # `(...)`, or an escaped `\( ... \)`, whose contents look like LaTeX.
 INLINE = re.compile(r"\\?\(([^()\n]*?)\\?\)")
 # Regions the inline rule must not touch: code spans, and math that is already
@@ -33,6 +52,19 @@ PROTECTED = re.compile(r"`[^`\n]*`|\$[^$\n]+\$")
 
 def _looks_like_latex(text: str) -> bool:
     return bool(LATEX_HINT.search(text))
+
+
+def _looks_like_math_body(text: str) -> bool:
+    """True for a formula body carrying no LaTeX marker, false for prose."""
+    return bool(MATH_SIGN.search(text)) and not PROSE_WORD.search(text)
+
+
+def _is_math_block_body(body) -> bool:
+    if not body:
+        return False
+    if any(_looks_like_latex(b) for b in body):
+        return True
+    return all(_looks_like_math_body(b) for b in body)
 
 
 def _convert_inline(line: str) -> str:
@@ -96,9 +128,20 @@ def convert(text: str) -> str:
             # one would rstrip every remaining line and silently destroy the
             # markdown hard breaks in the rest of the note.
 
+        if SETEXT_OPEN.match(line):
+            body, end = _read_setext_body(lines, i + 1)
+            if end is not None:
+                out.append("$$")
+                # The one blank line is where the swallowed setext `=` was.
+                out.extend("=" if not b.strip() else _trim_math_line(b)
+                           for b in body)
+                out.append("$$")
+                i = end + 1
+                continue
+
         if OPEN_DISPLAY.match(line):
             body, end = _read_display_body(lines, i + 1)
-            if end is not None and any(_looks_like_latex(b) for b in body):
+            if end is not None and _is_math_block_body(body):
                 out.append("$$")
                 out.extend(_trim_math_line(b) for b in body)
                 out.append("$$")
@@ -122,7 +165,7 @@ def _trim_math_line(line: str) -> str:
     stripped = line.rstrip()
     if stripped != line and (len(stripped) - len(stripped.rstrip("\\"))) % 2:
         stripped += "\\"
-    return stripped
+    return LOST_SPACING.sub(r",\\\1", stripped)
 
 
 def _has_closing_display(lines, start):
@@ -139,6 +182,32 @@ def _read_display_body(lines, start):
             return body, j
         if not lines[j].strip():
             break  # a blank line means this was never a math block
+        body.append(lines[j])
+        j += 1
+    return body, None
+
+
+def _read_setext_body(lines, start):
+    """Return (body, index_of_closing_bracket) for a `# [` artifact, or (body, None).
+
+    Bracket depth is tracked rather than stopping at the first `]`, because the
+    body may itself contain a literal bracketed vector on its own lines. Exactly
+    one blank line must be present: that is the slot the setext `=` was read out
+    of, and without it there is nothing to reconstruct.
+    """
+    body = []
+    depth = 1
+    j = start
+    while j < len(lines):
+        if OPEN_DISPLAY.match(lines[j]):
+            depth += 1
+        elif CLOSE_DISPLAY.match(lines[j]):
+            depth -= 1
+            if depth == 0:
+                blanks = [b for b in body if not b.strip()]
+                if len(blanks) == 1 and any(_looks_like_latex(b) for b in body):
+                    return body, j
+                return body, None
         body.append(lines[j])
         j += 1
     return body, None
