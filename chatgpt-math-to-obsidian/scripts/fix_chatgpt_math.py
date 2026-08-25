@@ -40,9 +40,12 @@ PROSE_WORD = re.compile(r"[A-Za-z]{3,}")
 SETEXT_OPEN = re.compile(r"^#[ \t]+\\?\[\s*$")
 
 # A LaTeX spacing command that lost its backslash in the paste: `0.72,\;`
-# arrives as `0.72,;`. The surviving character names the command, so this too is
-# determined rather than guessed.
-LOST_SPACING = re.compile(r",([,;:])")
+# arrives as `0.72,;`, rendering as a stray semicolon. These only ever land at
+# the end of a line inside a `$$` block, where MathJax already joins lines with
+# a space -- so the spacing is a no-op and the stray character is deleted rather
+# than reconstructed. Deleting needs no guess about which command it was. The
+# comma before it is a list separator and is kept.
+LOST_SPACING = re.compile(r",[,;:]")
 
 # `(...)`, or an escaped `\( ... \)`, whose contents look like LaTeX.
 INLINE = re.compile(r"\\?\(([^()\n]*?)\\?\)")
@@ -204,7 +207,7 @@ def _trim_math_line(line: str) -> str:
     stripped = line.rstrip()
     if stripped != line and (len(stripped) - len(stripped.rstrip("\\"))) % 2:
         stripped += "\\"
-    return LOST_SPACING.sub(r",\\\1", stripped)
+    return LOST_SPACING.sub(",", stripped)
 
 
 def _has_closing_display(lines, start):

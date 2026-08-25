@@ -275,33 +275,48 @@ def test_heading_bracket_without_latex_body_is_untouched():
 
 
 # --- Lost-backslash spacing commands -----------------------------------------
-# `0.72,\;` loses its backslash in the paste and arrives as `0.72,;`. The
-# surviving character identifies the command that lost the backslash, so the
-# repair is determined, not guessed.
+# `0.72,\;` loses its backslash in the paste and arrives as `0.72,;`, which
+# renders as a stray semicolon. These commands only ever land at the end of a
+# line inside a `$$` block, where MathJax already joins lines with a space, so
+# the spacing is a no-op and the stray character is simply deleted. Deleting
+# needs no inference about which command it was; the comma before it is a list
+# separator and must survive.
 
-def test_lost_backslash_thin_space_is_restored():
-    assert convert("$$\n0.72,,\n$$\n") == "$$\n0.72,\\,\n$$\n"
+def test_stray_comma_spacing_is_deleted():
+    assert convert("$$\n0.72,,\n$$\n") == "$$\n0.72,\n$$\n"
 
 
-def test_lost_backslash_thick_space_is_restored():
+def test_stray_semicolon_spacing_is_deleted():
     src = "$$\nQ_{\\text{new}}K_1^T,;\n$$\n"
-    assert convert(src) == "$$\nQ_{\\text{new}}K_1^T,\\;\n$$\n"
+    assert convert(src) == "$$\nQ_{\\text{new}}K_1^T,\n$$\n"
 
 
-def test_lost_backslash_medium_space_is_restored():
-    assert convert("$$\na,:\n$$\n") == "$$\na,\\:\n$$\n"
+def test_stray_colon_spacing_is_deleted():
+    assert convert("$$\na,:\n$$\n") == "$$\na,\n$$\n"
 
 
-def test_lost_backslash_repair_applies_in_converted_display_blocks():
-    assert convert("[  \n\\ldots,,  \n]\n") == "$$\n\\ldots,\\,\n$$\n"
+def test_stray_spacing_deleted_in_converted_display_blocks():
+    assert convert("[  \n\\ldots,,  \n]\n") == "$$\n\\ldots,\n$$\n"
 
 
-def test_lost_backslash_repair_is_idempotent():
+def test_separator_comma_survives():
+    """Only the stray character goes; the list separator is content."""
+    src = "$$\n0.72,,\n0.15,,\n0.31\n$$\n"
+    assert convert(src) == "$$\n0.72,\n0.15,\n0.31\n$$\n"
+
+
+def test_stray_spacing_deletion_is_idempotent():
     once = convert("$$\n0.72,,\n$$\n")
     assert convert(once) == once
 
 
-def test_spacing_repair_does_not_touch_prose():
+def test_intact_spacing_command_is_left_alone():
+    """A backslash that survived the paste is real LaTeX, not an artifact."""
+    src = "$$\nh_{\\text{sat}},\\ldots,\n$$\n"
+    assert convert(src) == src
+
+
+def test_spacing_deletion_does_not_touch_prose():
     src = "Wait, ; that is odd, , really.\n"
     assert convert(src) == src
 
