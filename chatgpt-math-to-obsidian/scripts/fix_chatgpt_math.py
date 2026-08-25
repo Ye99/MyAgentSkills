@@ -46,6 +46,12 @@ SETEXT_OPEN = re.compile(r"^#[ \t]+\\?\[\s*$")
 # than reconstructed. Deleting needs no guess about which command it was. The
 # comma before it is a list separator and is kept.
 LOST_SPACING = re.compile(r",[,;:]")
+# The same spacing command with its backslash intact, at the end of a line of
+# math. An undo or a re-paste restores this form, and it is the same no-op, so
+# it is dropped too -- otherwise the cleanup cannot be repeated. The lookbehind
+# keeps the trailing `\\` of a matrix row separator out of reach; mid-line
+# spacing is real and is left alone.
+TRAILING_SPACING = re.compile(r"(?:(?<!\\)\\[,;:!])+$")
 
 # `(...)`, or an escaped `\( ... \)`, whose contents look like LaTeX.
 INLINE = re.compile(r"\\?\(([^()\n]*?)\\?\)")
@@ -207,7 +213,7 @@ def _trim_math_line(line: str) -> str:
     stripped = line.rstrip()
     if stripped != line and (len(stripped) - len(stripped.rstrip("\\"))) % 2:
         stripped += "\\"
-    return LOST_SPACING.sub(",", stripped)
+    return TRAILING_SPACING.sub("", LOST_SPACING.sub(",", stripped))
 
 
 def _has_closing_display(lines, start):

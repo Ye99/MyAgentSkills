@@ -98,7 +98,14 @@ never convert with no recoverable copy of the paste.
     inside a `$$` block, where MathJax already joins lines with a space — so the spacing is a
     no-op and the character is simply dropped: `,,` `,;` `,:` → `,`. Deleting needs no guess
     about which command it was. The comma before it is a list separator and is kept. Applied
-    inside math only; a backslash that survived the paste is real LaTeX and is left alone.
+    inside math only.
+
+    The **intact** form is dropped too: a trailing `\,` `\;` `\:` `\!` at the end of a line of
+    math is the same no-op whether or not its backslash survived the paste. Handling only the
+    artifact form meant an undo or a re-paste restored spacing the script would then refuse to
+    clean, so the cleanup could not be repeated. Two things stay out of reach: the trailing
+    `\\` of a matrix row separator (a lookbehind keeps deletion from eating into it), and
+    mid-line spacing, which is real and is preserved.
 11. **An inline `(...)` span must survive five vetoes.** A LaTeX marker alone is not evidence
     of math — function calls, string literals, and prose all carry one. See below.
 
@@ -195,7 +202,7 @@ Scoping is still the cheaper habit: run it on **the file you just pasted into**,
 ## Verification
 
 ```bash
-python3 -m pytest tests -q                  # 71 cases: conversion, guardrails, re-run safety, CLI
+python3 -m pytest tests -q                  # 75 cases: conversion, guardrails, re-run safety, CLI
                                             # (no pytest? python3 -m venv .venv && .venv/bin/pip install pytest)
 git diff --stat note.md                     # line count must be unchanged
 git diff note.md                            # every hunk should be a delimiter swap only

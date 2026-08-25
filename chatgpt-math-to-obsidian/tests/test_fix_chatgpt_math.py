@@ -310,9 +310,36 @@ def test_stray_spacing_deletion_is_idempotent():
     assert convert(once) == once
 
 
-def test_intact_spacing_command_is_left_alone():
-    """A backslash that survived the paste is real LaTeX, not an artifact."""
+def test_intact_spacing_command_at_end_of_line_is_also_deleted():
+    """Same no-op, whether or not the backslash survived the paste.
+
+    An undo or a re-paste can restore the intact `,\\;` form. Deleting only the
+    artifact form left it behind, so the cleanup could not be repeated.
+    """
+    assert convert("$$\n0.72,\\,\n$$\n") == "$$\n0.72,\n$$\n"
+    assert convert("$$\nh_{\\text{The}},\\;\n$$\n") == "$$\nh_{\\text{The}},\n$$\n"
+
+
+def test_non_spacing_command_at_end_of_line_survives():
+    """`\\ldots` is content, not spacing."""
     src = "$$\nh_{\\text{sat}},\\ldots,\n$$\n"
+    assert convert(src) == src
+
+
+def test_row_separator_is_not_mistaken_for_spacing():
+    """`a\\\\` ends in a backslash pair; deleting into it would break the matrix."""
+    src = "$$\n\\begin{bmatrix}\na\\\\\nb\n\\end{bmatrix}\n$$\n"
+    assert convert(src) == src
+
+
+def test_mid_line_spacing_is_preserved():
+    """Only end-of-line spacing is a no-op; mid-line it is real."""
+    src = "$$\na\\;b\n$$\n"
+    assert convert(src) == src
+
+
+def test_spacing_outside_math_is_untouched():
+    src = "prose ending in a comma,\\;\n"
     assert convert(src) == src
 
 
