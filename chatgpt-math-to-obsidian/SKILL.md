@@ -89,12 +89,15 @@ never convert with no recoverable copy of the paste.
 8. **A display body needs no LaTeX marker.** `n=11` and `128K-103K=25K` are formulas with no
    `\command` and no `_{`/`^{` group. The bare `[` / `]` pair is itself strong evidence of
    display math, so an operator or a digit is enough — but a word of three or more letters
-   means prose, and prose in brackets stays untouched. (The inline `(...)` rule keeps the
-   stricter marker requirement: parentheses are far too common in prose to relax it.)
+   means prose, and prose in brackets stays untouched. The inline `(...)` rule keeps the
+   stricter marker requirement and adds vetoes of its own (rule 11): parentheses are far too
+   common in prose to relax them.
 9. **A `# [` heading is a swallowed setext `=`.** See below.
 10. **A spacing command that lost its backslash is restored.** `0.72,\;` arrives as `0.72,;`.
     The surviving character names the command, so `,,` → `,\,`, `,;` → `,\;`, `,:` → `,\:`.
     Applied inside math only.
+11. **An inline `(...)` span must survive five vetoes.** A LaTeX marker alone is not evidence
+    of math — function calls, string literals, and prose all carry one. See below.
 
 ### Rule 9: the `# [` setext artifact
 
@@ -133,6 +136,37 @@ $$
 
 Stopping at the inner `]` would close the block early and strand the outer one.
 
+### Rule 11: what disqualifies an inline `(...)` span
+
+A LaTeX marker inside parentheses is **not** sufficient evidence of inline math. Prose,
+function calls, and printf strings all contain one, and the original rule mangled all three.
+Five vetoes now apply; any one of them leaves the span alone:
+
+| Veto | Example it rejects | Why |
+|---|---|---|
+| Preceded by an identifier character | `exp(z_{t,i})`, `P(y_t \mid x)` | Function application — converting orphans the name as `exp$z_{t,i}$` |
+| Contains a quote | `Printf("%s\n", x)` | A string literal is code |
+| Contains `\[` or `\]` | `(\[f_{\min}, f_{\max}\])` | Escaped markdown, not a formula |
+| Two or more ordinary words remain | `(its weights, \theta)` | Parentheses holding a sentence |
+| Marker is only `\n` / `\t` | `(to fix \n)` | C escapes, not LaTeX — see below |
+
+The word count is taken **after** stripping `\text{...}`, `\mathrm{...}` and friends, because
+those legitimately hold prose: `(\text{next token}\mid x)` still converts.
+
+`LATEX_HINT` requires **two** letters after the backslash. `\n` and `\t` appear constantly in
+format strings and shell snippets, and every LaTeX command that matters here is longer.
+
+Genuine pasted inline math — `(Q_{\text{it}})`, `(\theta)`, `(d_{\text{model}})` — is preceded
+by a space and holds no sentence, so it passes all five.
+
+**Measured effect.** Across one notes repo of ~900 markdown files, a repo-wide `--check`
+flagged 4 files before these vetoes and **every hunk was damage**; afterwards it flags 0.
+Meanwhile a raw ChatGPT paste run through the script once now reproduces, byte for byte, a
+result that previously needed three script runs plus hand repair.
+
+Scoping is still the cheaper habit: run it on **the file you just pasted into**, read the
+`--check` diff, and keep the commit-the-paste-first step.
+
 ## Guardrails (why the naive one-liner fails)
 
 - **Never run the inline `(...)` rule inside a math block.** `P(\text{next token})` has real
@@ -158,7 +192,7 @@ Stopping at the inner `]` would close the block early and strand the outer one.
 ## Verification
 
 ```bash
-python3 -m pytest tests -q                  # 55 cases: conversion, guardrails, re-run safety, CLI
+python3 -m pytest tests -q                  # 69 cases: conversion, guardrails, re-run safety, CLI
                                             # (no pytest? python3 -m venv .venv && .venv/bin/pip install pytest)
 git diff --stat note.md                     # line count must be unchanged
 git diff note.md                            # every hunk should be a delimiter swap only
@@ -183,26 +217,6 @@ The only differences should be the `=` signs rule 9 restored. Anything else is c
 
 Then open the note in Obsidian and confirm the formulas render.
 
-## Scope: run it on the note you just pasted into, never across a repo
-
-The inline `(...)` rule fires on any parenthesised text containing a `\command` or a `_{`
-group. In a *fresh ChatGPT paste* that is reliable. In ordinary prose and code it is not:
-
-| Existing text | What the inline rule does to it |
-|---|---|
-| `exp(z\_{t,i})` | `exp$z\_{t,i}$` |
-| `(its weights, θ\thetaθ)` | `$its weights, θ\thetaθ$` |
-| `fmt.Printf("%s\n", slice[i])` | `fmt.Printf$"%s\n", slice[i]$` |
-| `(e.g., stop at "\n\nUser:")` | `$e.g., stop at "\n\nUser:"$` |
-
-None of these are math. Measured on one notes repo, a repo-wide `--check` flagged four files
-and **every** hunk was damage of this kind. The rule cannot distinguish them from real inline
-math without understanding the sentence, so the protection is scoping, not cleverness:
-
-- Run it on **the single file you just pasted into**, not `*.md`.
-- Read the `--check` diff before applying. Prose being swallowed into `$...$` is the signature.
-- Keep the commit-the-paste-first step. It is what makes this recoverable.
-
 ## Paste Artifacts This Tool Deliberately Does Not Fix
 
 These need a human decision, because repairing them means supplying content that is not in the
@@ -211,6 +225,10 @@ file. Fix them by hand after running the script, then re-run `--check` to confir
 - **A lone `$` in prose** (currency, shell variables) is read as the start of a math span and
   can shield the rest of the line from conversion. It is never corrupted, just skipped —
   convert that formula by hand.
+- **A marker-less inline span**, such as `(n)` or `(x_i)`. Rule 8 relaxes the marker
+  requirement for *display* blocks because the `[` / `]` pair is itself evidence; inline
+  parentheses have no such structure, and `(n)` is ordinary prose far more often than it is
+  math. Wrap these by hand.
 - **A display body that mixes prose and formula**, such as `[` / `n=100,000 tokens` / `]`.
   Rule 8's three-letter-word veto rejects it and rule 1 finds no LaTeX marker, so it is left
   alone. Decide whether the word belongs inside the math or outside it, then wrap by hand.
