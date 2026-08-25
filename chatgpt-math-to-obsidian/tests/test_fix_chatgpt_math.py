@@ -304,3 +304,58 @@ def test_lost_backslash_repair_is_idempotent():
 def test_spacing_repair_does_not_touch_prose():
     src = "Wait, ; that is odd, , really.\n"
     assert convert(src) == src
+
+
+# --- Inline rule must not swallow prose or code ------------------------------
+# Every line below is real text from a notes repo that the inline rule mangled.
+# A `\command` or `_{` group inside parentheses is not sufficient evidence of
+# inline math: prose, function calls, and printf format strings all contain one.
+
+@pytest.mark.parametrize("src", [
+    # Function application: the identifier belongs to the formula, so breaking
+    # it out as `exp$z_{t,i}$` is always wrong.
+    "the softmax: P(y\\_t \\= w\\_i | y\\_{\\<t}, x) \\= softmax(z\\_{t,i}).\n",
+    "computes P(\\text{next token}\\mid x) here\n",
+    "we get exp(z\\_{t,i}) / Σ\\_{j=1}^{|V|} exp(z\\_{t,j}).\n",
+    # Code: printf format strings and shell snippets.
+    "          fmt.Printf(\"%s\\n\", slice\\[i\\])\n",
+    "(to fix \\n) curl http://localhost:8000/generate\n",
+    # Prose that happens to contain a LaTeX command.
+    "The model’s **parameters** (its weights, θ\\thetaz) stay fixed.\n",
+    "* Stop sequences: hard brakes to end cleanly (e.g., stop at “\\n\\nUser:”).\n",
+    # Prose parentheses wrapping an escaped-markdown bracket group.
+    "mapping their range (\\[f\\_{\\min}, f\\_{\\max}\\]) into a smaller range\n",
+])
+def test_inline_rule_leaves_prose_and_code_alone(src):
+    assert convert(src) == src
+
+
+def test_function_application_is_not_inline_math():
+    """`exp(z_{t,i})` -> `exp$z_{t,i}$` orphans the function name."""
+    assert convert("exp(z_{t,i})\n") == "exp(z_{t,i})\n"
+
+
+def test_backslash_n_is_not_a_latex_command():
+    """`\\n` is a C escape, not LaTeX; it must not qualify as a marker."""
+    assert convert("printf (\\n) here\n") == "printf (\\n) here\n"
+    assert convert("a tab (\\t) there\n") == "a tab (\\t) there\n"
+
+
+def test_quoted_text_in_parens_is_not_inline_math():
+    assert convert("call f(\"%s\\theta\") now\n") == "call f(\"%s\\theta\") now\n"
+
+
+def test_multiple_prose_words_in_parens_is_not_inline_math():
+    src = "the value (its weights, \\theta) stays\n"
+    assert convert(src) == src
+
+
+def test_prose_words_inside_text_command_are_still_math():
+    """`\\text{next token}` is math despite containing prose words."""
+    src = "the term (\\text{next token}\\mid x) here\n"
+    assert convert(src) == "the term $\\text{next token}\\mid x$ here\n"
+
+
+def test_genuine_inline_math_still_converts():
+    src = "a Query vector (Q_{\\text{it}}), and (\\theta) changed.\n"
+    assert convert(src) == "a Query vector $Q_{\\text{it}}$, and $\\theta$ changed.\n"

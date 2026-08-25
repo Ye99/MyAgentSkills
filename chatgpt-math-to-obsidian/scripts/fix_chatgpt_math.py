@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 
 # A LaTeX command (\text, \theta, \cdot ...) or a sub/superscript group.
-LATEX_HINT = re.compile(r"\\[A-Za-z]+|[_^]\{")
+# Two letters minimum: `\n` and `\t` are C escapes that appear constantly in
+# printf strings and shell snippets, and every LaTeX command that matters here
+# is longer. Accepting them made format strings look like math.
+LATEX_HINT = re.compile(r"\\[A-Za-z]{2,}|[_^]\{")
 
 FENCE = re.compile(r"^\s*(?:```|~~~)")
 OPEN_DISPLAY = re.compile(r"^\s*\\?\[\s*$")
@@ -43,6 +46,18 @@ LOST_SPACING = re.compile(r",([,;:])")
 
 # `(...)`, or an escaped `\( ... \)`, whose contents look like LaTeX.
 INLINE = re.compile(r"\\?\(([^()\n]*?)\\?\)")
+
+# A LaTeX marker inside parentheses is not sufficient evidence of inline math:
+# prose, function calls, and printf strings all contain one. These veto it.
+# Quotes mean a string literal; an escaped `\[` means markdown, not a formula.
+QUOTE = re.compile("[\"'\u201c\u201d\u2018\u2019]")
+ESCAPED_BRACKET = re.compile(r"\\[\[\]]")
+# `\text{...}` legitimately holds prose words, so strip those groups (and every
+# other command) before looking for the words that betray an English sentence.
+TEXT_GROUP = re.compile(
+    r"\\(?:text|textrm|textbf|textit|mathrm|mathbf|operatorname)\s*\{[^{}]*\}")
+COMMAND = re.compile(r"\\[A-Za-z]+")
+WORD = re.compile(r"[A-Za-z]{2,}")
 # Regions the inline rule must not touch: code spans, and math that is already
 # converted. A `$...$` span is math, so its parentheses belong to the formula,
 # and a prose `(...)` wrapping one must not be swallowed either. Without this,
@@ -79,9 +94,33 @@ def _convert_inline(line: str) -> str:
     return "".join(out)
 
 
+def _is_inline_math(body: str) -> bool:
+    """True only for a parenthesised span that is a formula and nothing else."""
+    if not body or not _looks_like_latex(body):
+        return False
+    if QUOTE.search(body) or ESCAPED_BRACKET.search(body):
+        return False
+    # Two or more ordinary words left after the LaTeX is stripped means the
+    # parentheses are holding a sentence, not a formula.
+    residue = COMMAND.sub(" ", TEXT_GROUP.sub(" ", body))
+    return len(WORD.findall(residue)) < 2
+
+
+def _follows_identifier(match: re.Match) -> bool:
+    """True for `exp(...)` / `P(...)`: a function application, not a math span.
+
+    Converting one strands the function name outside the math: `exp(z_{t,i})`
+    becomes `exp$z_{t,i}$`. Genuine pasted inline math is always preceded by a
+    space or the start of the line.
+    """
+    start = match.start()
+    return start > 0 and (match.string[start - 1].isalnum()
+                          or match.string[start - 1] in "_.")
+
+
 def _inline_sub(match: re.Match) -> str:
     body = match.group(1).strip()
-    if not body or not _looks_like_latex(body):
+    if not _is_inline_math(body) or _follows_identifier(match):
         return match.group(0)
     return f"${body}$"
 
