@@ -93,9 +93,12 @@ never convert with no recoverable copy of the paste.
    stricter marker requirement and adds vetoes of its own (rule 11): parentheses are far too
    common in prose to relax them.
 9. **A `# [` heading is a swallowed setext `=`.** See below.
-10. **A spacing command that lost its backslash is restored.** `0.72,\;` arrives as `0.72,;`.
-    The surviving character names the command, so `,,` → `,\,`, `,;` → `,\;`, `,:` → `,\:`.
-    Applied inside math only.
+10. **A spacing command that lost its backslash is deleted, not restored.** `0.72,\;` arrives
+    as `0.72,;` and renders as a stray semicolon. These land only at the *end of a line*
+    inside a `$$` block, where MathJax already joins lines with a space — so the spacing is a
+    no-op and the character is simply dropped: `,,` `,;` `,:` → `,`. Deleting needs no guess
+    about which command it was. The comma before it is a list separator and is kept. Applied
+    inside math only; a backslash that survived the paste is real LaTeX and is left alone.
 11. **An inline `(...)` span must survive five vetoes.** A LaTeX marker alone is not evidence
     of math — function calls, string literals, and prose all carry one. See below.
 
@@ -192,7 +195,7 @@ Scoping is still the cheaper habit: run it on **the file you just pasted into**,
 ## Verification
 
 ```bash
-python3 -m pytest tests -q                  # 69 cases: conversion, guardrails, re-run safety, CLI
+python3 -m pytest tests -q                  # 71 cases: conversion, guardrails, re-run safety, CLI
                                             # (no pytest? python3 -m venv .venv && .venv/bin/pip install pytest)
 git diff --stat note.md                     # line count must be unchanged
 git diff note.md                            # every hunk should be a delimiter swap only
@@ -241,7 +244,7 @@ Formerly on this list, now automated — do not re-fix these by hand:
 | Artifact | Rule | Why it is reconstruction, not invention |
 |---|---|---|
 | `# [` with a swallowed `=` | 9 | A `#` setext underline is always `=`, and the blank line marks its slot |
-| `,,` / `,;` / `,:` inside math | 10 | The surviving character names the spacing command that lost its backslash |
+| `,,` / `,;` / `,:` inside math | 10 | The spacing is a no-op at end of line, so the stray character is deleted |
 | `[` / `n=11` / `]` | 8 | The bracket pair is the evidence; no marker needed |
 
 ## Applying by Hand
