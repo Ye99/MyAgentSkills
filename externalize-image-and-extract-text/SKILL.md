@@ -61,7 +61,11 @@ offer it** — do not write it.
      `![[Pasted image 20260517214504.png]]`, move it into
      `<NoteBase>.assets/` with a non-colliding descriptive filename, then update
      the wikilink.
-   - If the image is already in a suitable assets folder, leave it in place.
+   - If the image is sourced from outside the vault (`~/Documents`, `~/Downloads`,
+     a scanner or camera dump), move it into `<NoteBase>.assets/` under a
+     descriptive filename the same way. Outside the vault is not a reason to copy.
+   - If the image is already in a suitable assets folder, leave it in place,
+     but still rename it if its filename does not describe its contents.
 4. Fix layout only where the move breaks it — e.g. an embed trailing a list item
    or run together with a paragraph gets its own block. Nothing else.
 5. **Stop here unless transcription was requested.** Run the verification below.
@@ -75,13 +79,45 @@ offer it** — do not write it.
 8. Insert the extracted text immediately after the relevant image embed unless
    surrounding context clearly calls for another placement.
 
+## Move, Never Copy
+
+Every image this skill relocates is **moved**, and the run is not finished while
+a second copy of it exists on disk.
+
+Use `mv`. If the workflow made a copy for any reason, the run has one more
+required step: delete the source, then confirm the source path is gone.
+
+```bash
+mv ~/Documents/scan.jpg Note.assets/password-lock-instructions.jpg
+
+# If you copied instead, confirm the two are identical before deleting:
+md5sum ~/Documents/scan.jpg Note.assets/password-lock-instructions.jpg
+rm -f ~/Documents/scan.jpg   # -f: an `rm -i` alias otherwise prompts and
+                             # silently deletes nothing in a non-interactive shell
+ls ~/Documents/scan.jpg      # must report "No such file or directory"
+```
+
+The source is deleted regardless of where it lived — inside the vault or outside
+it, `~/Documents` and `~/Downloads` included. The note's assets folder becomes the
+one copy of that image.
+
+The only exception is an explicit user instruction to keep the original. Report
+the leftover file when that happens, so the duplicate is a choice rather than a
+side effect.
+
 ## Naming Moved Images
 
-A descriptive filename is part of the default mode, and it is the *only* place
+Renaming is part of every relocation, not just pasted-image cleanup. A
+descriptive filename is part of the default mode, and it is the *only* place
 image content belongs when transcription was not requested. Derive it from the
-nearest heading or the image's evident subject: `needle-in-a-haystack.png`, not
-`pasted-image-12.png`. Keep it kebab-case and collision-free within the assets
-folder.
+image's evident subject or the nearest heading: `needle-in-a-haystack.png`, not
+`pasted-image-12.png`, `IMG_4821.jpg`, or `55LBackpackLockManual.jpg`. Keep it
+kebab-case and collision-free within the assets folder.
+
+The assets folder already carries the note's name, so do not repeat the note
+name in the filename — describe what is *in* the image:
+`Note.assets/password-lock-instructions.jpg`, not
+`Note.assets/note-name-image-1.jpg`.
 
 ## Markdown Output (transcription mode)
 
@@ -118,9 +154,34 @@ its body, and the blank line it introduced. Keep the embed and the surrounding
 prose. Verify with `rg -n 'Image text' Note.md` returning nothing, and confirm
 in the diff that only transcription lines were removed.
 
+## Report What Changed
+
+Every run ends with a short report to the user. The file moves are invisible
+otherwise — the user sees a rendered note, not the filesystem.
+
+The report is a bullet per image plus one closing line:
+
+```markdown
+- `~/Documents/55LBackpackLockManual.jpg` → `Note.assets/password-lock-instructions.jpg` (moved, source deleted)
+- Transcribed its text into the note under `#### Image text`.
+
+Verified: the asset exists and is non-empty, the wikilink resolves, and the
+source path is gone.
+```
+
+Each bullet names the **source path**, the **destination path**, and whether the
+source was deleted. State the transcription bullet only when transcription ran.
+The closing line reports the Verification checks you actually ran.
+
+Anything that did not go cleanly gets its own bullet: a source you were asked to
+keep, a filename that collided, an image you left in place, text you could not
+read reliably. A run with nothing to flag says so in the closing line and stops.
+
 ## Reliability Rules
 
 - Keep the image embed unless the user explicitly asks to replace or delete it.
+- Move images, never copy them. A run that leaves the source file in place has
+  not finished — see the Move, Never Copy section.
 - Never add transcription that was not requested. See the default rule above.
 - When transcribing: stop without editing if material text cannot be read
   reliably; verify low-confidence OCR visually before writing.
@@ -135,9 +196,14 @@ in the diff that only transcription lines were removed.
 After editing, check:
 
 - each `![[...]]` image target created or changed exists and is non-empty,
+- **every source path an image was moved from no longer exists** — `ls` it and
+  confirm the "No such file or directory" error, rather than assuming the move
+  or the delete succeeded,
+- each moved image's filename describes its contents,
 - the note no longer references any moved root-level pasted image path,
 - `rg -n 'data:image' Note.md` is empty if base64 conversion was performed,
 - **no transcription was added unless it was requested** — in default mode
   `git diff` should show link rewrites and layout fixes only,
 - the inserted text appears in the expected section (transcription mode only),
-- the git diff contains only the intended note and asset changes.
+- the git diff contains only the intended note and asset changes,
+- the report described in Report What Changed was given to the user.
