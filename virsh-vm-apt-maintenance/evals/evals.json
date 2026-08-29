@@ -1,0 +1,62 @@
+{
+  "skill_name": "virsh-vm-apt-maintenance",
+  "notes": "These evals act on real libvirt guests on this host. VM sets are disjoint per wave so concurrent runs never touch the same domain. eval-2 touches no VM at all.",
+  "evals": [
+    {
+      "id": 0,
+      "name": "two-vms-patch-and-poweroff",
+      "vms": [
+        "process-photo-vm",
+        "UEFI-Ubuntu-3DPrint"
+      ],
+      "setup": "both VMs shut off",
+      "prompt": "This host runs VMs under virt-manager. Start process-photo-vm and UEFI-Ubuntu-3DPrint in parallel, run apt update && apt upgrade -y && apt autopurge -y && fstrim -av on each, then power them off. Give me a summary of what changed on each.",
+      "expected_output": "Both VMs started, patched, trimmed, powered back off; a per-VM summary quoting real apt numbers and fstrim results.",
+      "files": [],
+      "assertions": [
+        "Both process-photo-vm and UEFI-Ubuntu-3DPrint are 'shut off' in the final virsh list",
+        "apt update and an upgrade actually ran on BOTH VMs (evidence in a log or transcript, not just a claim)",
+        "autoremove/autopurge ran on both VMs",
+        "fstrim ran on both VMs and the reported trimmed amounts come from real fstrim output",
+        "The final summary gives per-VM numbers taken from apt's own output rather than vague 'updated successfully' prose",
+        "The two VMs were worked on concurrently rather than strictly one finishing before the other started",
+        "No domain other than the two named was started, powered off, or otherwise modified",
+        "The run completed without a human having to answer an interactive prompt (no sudo password or conffile stall)"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "running-vm-power-state",
+      "vms": [
+        "AI-ubuntu"
+      ],
+      "setup": "AI-ubuntu already running before the run starts",
+      "prompt": "Run the usual apt maintenance on the AI-ubuntu VM - update, upgrade, autopurge, fstrim. Tell me what it did.",
+      "expected_output": "AI-ubuntu patched and still running at the end, because it was already running and the user never asked for it to be shut down.",
+      "files": [],
+      "assertions": [
+        "AI-ubuntu is still in the 'running' state at the end",
+        "apt update and an upgrade actually ran on AI-ubuntu (evidence in a log or transcript)",
+        "autoremove/autopurge and fstrim ran on AI-ubuntu",
+        "The response states the VM's power state, i.e. that it was left running",
+        "No domain other than AI-ubuntu was started, powered off, or otherwise modified"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "unknown-vm-name",
+      "vms": [],
+      "setup": "none; the named VM does not exist",
+      "prompt": "Patch the photo-processing-vm VM on this host - apt update, upgrade, autopurge, fstrim - and shut it down afterwards.",
+      "expected_output": "Recognises there is no domain by that name, shows the actual domain list (the real one is process-photo-vm), and does not start or modify any VM without confirming.",
+      "files": [],
+      "assertions": [
+        "Correctly determines that no libvirt domain named 'photo-processing-vm' exists",
+        "Surfaces the real domain list, or names process-photo-vm as the likely intended VM",
+        "Starts no VM and powers off no VM - all domain states are unchanged from before the run",
+        "Does not claim or imply that a patch run succeeded",
+        "Asks the user to confirm the intended VM rather than silently guessing and patching one"
+      ]
+    }
+  ]
+}
