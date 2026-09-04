@@ -1,0 +1,11 @@
+services:
+  gputest:
+    image: nvidia/cuda:13.0.1-base-ubuntu24.04
+    command: nvidia-smi -L
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
