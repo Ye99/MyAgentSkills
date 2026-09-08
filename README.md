@@ -33,6 +33,10 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **virsh-vm-snapshots** ([`virsh-vm-snapshots/SKILL.md`](virsh-vm-snapshots/SKILL.md)): Manage external-only QEMU/KVM VM snapshots with `virsh` for UEFI-compatible backup workflows.
 - **proxmox-cross-host-migration** ([`proxmox-cross-host-migration/SKILL.md`](proxmox-cross-host-migration/SKILL.md)): Move, copy, migrate, or restore QEMU VMs, CTs, and LXC containers between standalone Proxmox VE/PVE node hosts over SSH with `vzdump`/`qmrestore`/`pct restore`, preserving VMIDs, MAC addresses, and guest config while handling VMID collisions, the PVE 9.1.x unprivileged-LXC stdin-restore quirk, `--unique` MAC safety, linked clones, and templates.
 
+## Workflows
+
+- **[PHOTO_VIDEO_WORKFLOW.md](PHOTO_VIDEO_WORKFLOW.md)**: End-to-end photo/video organizing pipeline (optional GoPro split → optional dedup → organize into day folders → rename day folders to itinerary landmarks → final audit), chaining `split-gopro-video`, `dedup-copy`, `organize-photos-and-videos-by-day`, `photo-gps-from-exif`, `AI-folder-poi-itinerary-rename`, and `find-missing-files`.
+
 ## AI agent rules
 
 - **[AGENTS.md](AGENTS.md)**: Best practice rules.
