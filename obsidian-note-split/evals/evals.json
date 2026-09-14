@@ -1,0 +1,49 @@
+{
+  "skill_name": "obsidian-note-split",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My note 'Home Garden Log.md' has become a mess: tomato, irrigation and compost notes are scattered all over it. Split it into a few topic notes (keep the original file as an index) so things are grouped. The vault is the folder evals/files/sample-vault. Do not rewrite or clean up my text, and prove nothing got lost.",
+      "expected_output": "Topic notes for tomatoes, irrigation and composting, each gathering its scattered sections; 'Home Garden Log.md' becomes an index; every original line appears exactly once, verbatim; links to moved headings (inside the notes and in 'Weekend Plans.md') point at the new notes; a verification result is reported.",
+      "files": [
+        "evals/files/sample-vault"
+      ],
+      "expectations": [
+        "Every non-blank line of the original appears in the topic notes (nothing lost)",
+        "No original line appears more than once across the topic notes (nothing duplicated)",
+        "The bash code block is byte-identical in one topic note",
+        "The Wi-Fi password line is kept verbatim (not redacted)",
+        "All scattered tomato sections land in the same note",
+        "All scattered irrigation sections land in the same note",
+        "All scattered composting sections land in the same note",
+        "Home Garden Log.md still exists and links to every topic note (index)",
+        "Weekend Plans heading link now targets the note that holds 'Drip line layout'",
+        "Weekend Plans markdown heading link now targets the note that holds 'Composting'",
+        "Weekend Plans bare link [[Home Garden Log]] kept (points at the index)",
+        "The tomato problem link to 'Drip line layout' resolves after the split"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Break up 'Home Garden Log.md' in evals/files/sample-vault into separate notes by topic. Other notes link into specific headings of it, so make sure those links still work afterwards. Keep the code block and the wifi password line exactly as they are.",
+      "expected_output": "Split notes with the bash code block byte-identical (including the '# flash the controller firmware' comment line and the literal \\n), the password line unchanged, 'Weekend Plans.md' heading links rewritten to the destination notes, the bare [[Home Garden Log]] link left pointing at the index, and duplicate '### Problems' headings handled.",
+      "files": [
+        "evals/files/sample-vault"
+      ],
+      "expectations": [
+        "Every non-blank line of the original appears in the topic notes (nothing lost)",
+        "No original line appears more than once across the topic notes (nothing duplicated)",
+        "The bash code block is byte-identical in one topic note",
+        "The Wi-Fi password line is kept verbatim (not redacted)",
+        "All scattered tomato sections land in the same note",
+        "All scattered irrigation sections land in the same note",
+        "All scattered composting sections land in the same note",
+        "Home Garden Log.md still exists and links to every topic note (index)",
+        "Weekend Plans heading link now targets the note that holds 'Drip line layout'",
+        "Weekend Plans markdown heading link now targets the note that holds 'Composting'",
+        "Weekend Plans bare link [[Home Garden Log]] kept (points at the index)",
+        "The tomato problem link to 'Drip line layout' resolves after the split"
+      ]
+    }
+  ]
+}

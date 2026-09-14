@@ -32,6 +32,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **virsh-vm-apt-maintenance** ([`virsh-vm-apt-maintenance/SKILL.md`](virsh-vm-apt-maintenance/SKILL.md)): Patch one or more libvirt/QEMU/KVM Debian or Ubuntu guests unattended — start them in parallel, resolve each guest's IP from the DHCP leases, run `apt update`/`upgrade`/`autopurge` and `fstrim -av` over SSH, then restore each VM to the power state it started in.
 - **virsh-vm-snapshots** ([`virsh-vm-snapshots/SKILL.md`](virsh-vm-snapshots/SKILL.md)): Manage external-only QEMU/KVM VM snapshots with `virsh` for UEFI-compatible backup workflows.
 - **proxmox-cross-host-migration** ([`proxmox-cross-host-migration/SKILL.md`](proxmox-cross-host-migration/SKILL.md)): Move, copy, migrate, or restore QEMU VMs, CTs, and LXC containers between standalone Proxmox VE/PVE node hosts over SSH with `vzdump`/`qmrestore`/`pct restore`, preserving VMIDs, MAC addresses, and guest config while handling VMID collisions, the PVE 9.1.x unprivileged-LXC stdin-restore quirk, `--unique` MAC safety, linked clones, and templates.
+- **obsidian-note-split** ([`obsidian-note-split/SKILL.md`](obsidian-note-split/SKILL.md)): Split an oversized Obsidian note into self-descriptive topic notes plus an index, regrouping scattered sections verbatim, rewriting heading links in and out, proving no data loss, and writing through the Obsidian CLI with post-write checks.
 
 ## Workflows
 
