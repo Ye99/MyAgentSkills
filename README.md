@@ -5,6 +5,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 
 - **add-google-models-to-opencode** ([`add-google-models-to-opencode/SKILL.md`](add-google-models-to-opencode/SKILL.md)): Add or update Google provider models in the opencode.json configuration.
 - **azure-cool-to-cold** ([`azure-cool-to-cold/SKILL.md`](azure-cool-to-cold/SKILL.md)): Safely preflight, convert, and verify one Azure Blob container from Cool to Cold with strict scope and approval guards.
+- **book-notes-restructure** ([`book-notes-restructure/SKILL.md`](book-notes-restructure/SKILL.md)): Restructure reading notes in place to follow the source's real chapter hierarchy, regrouping scattered blocks verbatim, marking the reader's interleaved look-ups, and proving no data loss.
 - **chatgpt-math-to-obsidian** ([`chatgpt-math-to-obsidian/SKILL.md`](chatgpt-math-to-obsidian/SKILL.md)): Convert ChatGPT-pasted LaTeX in Markdown notes (bare `[ ... ]` and `(\text{...})` delimiters) into Obsidian MathJax `$$...$$` and `$...$`.
 - **cuda-major-upgrade** ([`cuda-major-upgrade/SKILL.md`](cuda-major-upgrade/SKILL.md)): Upgrade a Linux host across a CUDA major version, swapping the NVIDIA driver branch, keeping Docker GPU support, cleaning orphans, and verifying with real kernels on host and in containers.
 - **dedup-copy** ([`dedup-copy/SKILL.md`](dedup-copy/SKILL.md)): Copy files from a source to a destination while eliminating content-identical duplicates via jdupes, with scored keeper selection, JSON logging, and independent verification.
