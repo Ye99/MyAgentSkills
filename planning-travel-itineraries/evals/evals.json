@@ -1,0 +1,70 @@
+{
+  "skill_name": "planning-travel-itineraries",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Plan five days in Taipei from my saved places, which include the National Palace Museum, several night markets, Longshan Temple, a popular mountain national park just outside the city, and a large shopping mall. I have no special preferences and will use public transportation. Research current opening days and include travel time.",
+      "expected_output": "A source-backed, geographically clustered itinerary that applies the default culture-and-food profile, accounts for closed days, transfers, meals, and buffers, and explains cuts without treating review count as the only criterion.",
+      "expectations": [
+        "Applies the default profile (museums, history, distinctive culture, food markets) because no preferences were given",
+        "Includes travel time, meals, and buffers in each scheduled day",
+        "Checks current official hours, closed weekdays, and holiday closures",
+        "Looks up map ratings and review counts but keeps them separate from the final scheduling decision",
+        "Cuts or demotes the highly rated mountain park because outdoor sightseeing is not a defining strength and cultural stops compete for the time"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Plan eight days in Norway in late June. Make strong use of what the destination is known for. I am willing to rent a car where it saves time, but compare it with trains and ferries.",
+      "expected_output": "An outdoor-forward itinerary centered on scenery, fjords, and hiking, reached through the destination-strength adjustment rather than a stated hiking preference, with seasonally feasible access and segment-by-segment transport choices.",
+      "expectations": [
+        "Raises outdoor and hiking priority because official tourism sources show they are destination-defining, without the user asking for hiking",
+        "Does not default to museums merely because they are highly rated",
+        "Evaluates rental car, rail, and ferry options by segment",
+        "Checks trail access, seasonal roads and ferries, and realistic travel time"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Rework my existing ten-day itinerary in evals/files/existing-itinerary.md. Keep its raw popularity table, add a curated cluster table, remove stops that do not fit, and avoid unnecessary hotel changes. Show me the result for approval before finalizing the note.",
+      "expected_output": "A reconciled itinerary that preserves the raw table unchanged, adds a separate decision table, removes backtracking (Lisbon–Sintra–Lisbon, Porto–Braga–Porto) and one-night hotel hops, budgets transfers and hotel-change overhead, documents cuts such as the airport shopping mall, and waits for approval.",
+      "files": [
+        "evals/files/existing-itinerary.md"
+      ],
+      "expectations": [
+        "Does not modify or replace the raw popularity table",
+        "Adds geographic clusters and explicit keep/cut reasons in a separate table",
+        "Reduces hotel changes and accounts for packing, transfer, and check-in cost",
+        "Removes the Sintra and Braga backtracking by using day trips or regrouping",
+        "Cuts the shopping mall as low-priority and non-distinctive",
+        "Asks for approval and does not commit or push"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Create reusable planning guidance from my source note at evals/files/source-note-with-pii.md.",
+      "expected_output": "Reusable guidance containing only generalized preferences, with all identifying, account, booking, address, and private travel-history details excluded.",
+      "files": [
+        "evals/files/source-note-with-pii.md"
+      ],
+      "expectations": [
+        "No name, email, phone number, address, loyalty number, or reservation code from the fixture appears in the output",
+        "No past-trip destination or year from the fixture appears in the output",
+        "Generalized interests, pace, lodging, and hotel-change constraints are retained",
+        "Any examples added remain fictional and non-identifying"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Plan a seven-day trip through Utah's national parks starting and ending in Las Vegas. Skip museums entirely; I care about scenery, short hikes, and local food.",
+      "expected_output": "A road-trip itinerary that follows the explicit override instead of the museum-heavy default, recommends a rental car with driving times, parking, and park-entry constraints, and minimizes lodging base changes along a loop route.",
+      "expectations": [
+        "Follows the explicit override: schedules no museums despite the default profile",
+        "Recommends a rental car and compares it with alternatives for this dispersed region",
+        "Includes realistic driving times between parks and back to Las Vegas",
+        "Checks current park timed-entry or reservation requirements from official park sources",
+        "Plans lodging bases that avoid unnecessary nightly hotel changes"
+      ]
+    }
+  ]
+}
