@@ -1,0 +1,23 @@
+{
+  "skill_name": "download-youtube",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Download this video https://youtu.be/dQw4w9WgXcQ",
+      "expected_output": "A 1080p H.264 mp4 with the original-language audio in $HOME/Downloads, named with the video title and id. No dubbed audio track.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Get the original-language transcript of https://www.youtube.com/watch?v=dQw4w9WgXcQ and do not download the video.",
+      "expected_output": "Paragraphs from the original caption track, not an auto-translation track, produced from the json3 file.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Download https://youtu.be/dQw4w9WgXcQ in 4K.",
+      "expected_output": "A merged file using the 2160p https video row the user asked for, still with the original audio, saved under $HOME/Downloads.",
+      "files": []
+    }
+  ]
+}
