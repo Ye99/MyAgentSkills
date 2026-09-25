@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fill PDF Form (Flattened)"
+  short_description: "Fill PDF forms that render in every viewer"
+  default_prompt: "Fill this PDF form so the values show in browser PDF viewers, and verify it."
