@@ -1,6 +1,6 @@
 ---
 name: find-missing-files
-description: Use when you need to find files present in a source directory that are missing from a destination directory, compared by content hash (not filename). Handles large directories efficiently with multi-core hashing and a size-bucket optimisation.
+description: Use when you need to find files present in a source directory that are missing from a destination directory, compared by content hash (not filename). Handles large directories efficiently with multi-core hashing and a size-bucket optimisation. For a GoPro camera-card backup, use compare-gopro-backup.
 ---
 
 # Find Missing Files
@@ -21,6 +21,7 @@ Use this skill when:
 Do NOT use for:
 - Finding duplicate files (different purpose)
 - Comparing file metadata or timestamps
+- A GoPro camera-card backup. Use `compare-gopro-backup`, which reuses this comparison and ignores card database files the camera rewrites.
 
 ## Tool Location
 
