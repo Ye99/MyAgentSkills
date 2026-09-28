@@ -5,7 +5,10 @@ description: >-
   them extracted into a sibling assets folder, with Obsidian wiki-link image
   embeds replacing reference-style inline images, without OCR or transcription.
   Trigger on requests like "extract embedded images", "move base64 images to
-  assets folder", or "externalize base64 images".
+  assets folder", or "externalize base64 images". Do not use when the image is
+  already a file, including a root-level Obsidian paste such as
+  `![[Pasted image TIMESTAMP.png]]` that should move into a note assets folder.
+  Use `externalize-image-and-extract-text` for that.
 ---
 
 # Extract Embedded Images
@@ -15,23 +18,33 @@ Inverse of `convert-external-images`. Use when a markdown note has grown unwield
 ## When to use
 
 - The note ends with a long block of `[refname]: <data:image/png;base64,...>` definitions and the body uses `![alt][refname]` references to them.
-- The user mentions Obsidian, OCI-style notes, `OCI.assets`, or comparing against other notes that use `![[X.assets/imageN.png]]` wiki-link image syntax.
+- The user wants those base64 definitions rewritten to the same wiki-link style other notes already use, such as `![[X.assets/imageN.png]]`. An image that is already a file is not this case.
 - The user wants the note to load fast in an editor or to diff cleanly in git.
 
 This skill is the preferred replacement for `convert-external-images` for users who have decided embedded base64 hurts more than it helps (slow editor load, large diffs, hard to swap an image).
 
-If the user also asks to OCR, transcribe, or put image text into the note during
-conversion, use `externalize-image-and-extract-text` instead. If the user wants
-an existing image embed replaced by editable Markdown, use
-`rewrite-obsidian-image-notes` instead.
+## Not this skill
+
+Stop and switch skills before running `scripts/extract_images.py` when the image is already a file. This script only decodes `[ref]: <data:image/...;base64,...>` definitions. It does not move PNG or JPEG files.
+
+Use `externalize-image-and-extract-text` when any of these are true:
+
+- The note embeds a root-level pasted image, such as `![[Pasted image 20260928140438.png]]`, and the user wants that file moved into `<NoteBase>.assets/` with the wikilink updated.
+- The image already exists on disk (vault root, another folder, `~/Documents`, `~/Downloads`) and the user wants it in the note's assets folder.
+- The user says "pasted image", "move the image", or "external resource folder" and there is no `data:image` base64 in the note.
+
+Transcription is not required for that switch. `externalize-image-and-extract-text` moves the file and rewrites the wikilink on its own. Add OCR only when that skill's transcription trigger fires.
+
+If the user wants an existing image embed replaced by editable Markdown, use `rewrite-obsidian-image-notes` instead.
 
 ## Choose the Right Skill
 
 | Scenario | Use |
 | --- | --- |
 | Note contains `[ref]: <data:image/...;base64,...>` and the user only wants assets extracted | `extract-embedded-images` |
+| Image is already a file, including a root-level `![[Pasted image ....png]]`, and the user wants it in an assets folder | `externalize-image-and-extract-text` |
+| User wants that on-disk image kept and its text added to the note | `externalize-image-and-extract-text` |
 | Note embeds an image and the user wants the image replaced by editable Markdown | `rewrite-obsidian-image-notes` |
-| User wants to keep/externalize the image and also add its text to the note | `externalize-image-and-extract-text` |
 
 ## What it produces
 
