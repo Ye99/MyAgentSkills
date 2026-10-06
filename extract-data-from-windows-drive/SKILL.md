@@ -88,6 +88,7 @@ Copy everything a person made or kept off a Windows system drive. Leave out the 
 | Following junctions (`-a` keeps links, `-L` duplicates) | `--no-links`; every Vista+ junction points back inside the tree or to `C:/ProgramData` |
 | Unanchored `Windows/` drops a user folder named `Windows` | Anchor system trees with a leading `/` |
 | Case-sensitive `*.exe` misses `SETUP.EXE` | Bracket patterns `*.[Ee][Xx][Ee]` (shipped filter) |
+| Expecting `/X/**/*.cab` to match `X/top.cab` (git semantics) | rsync's `/**/` needs at least one folder; add `/X/*.cab` as well |
 | Counting only links outside excluded trees | The report lists both; `ProgramData/` and `Users/Default/` hold junctions too |
 | Deleting every `.cab` next to an installer | Windows Mobile `.cab` files are whole apps; only setup payloads are dead weight |
 | Report counts itself as extra data | Report files are prefixed `_COPY_REPORT`; `--ignore` adds more |

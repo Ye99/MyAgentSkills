@@ -167,7 +167,7 @@ def test_checksum_differences_fail(tmp_path):
 @pytest.mark.parametrize(
     ("glob", "path", "matches"),
     [
-        ("a/**/b.cab", "a/b.cab", True),
+        ("a/**/b.cab", "a/b.cab", False),         # rsync: '/**/' needs a directory
         ("a/**/b.cab", "a/x/y/b.cab", True),
         ("a/**/b.cab", "ab.cab", False),
         ("a/*.cab", "a/x/b.cab", False),
@@ -186,6 +186,7 @@ def test_unanchored_slash_pattern_matches_path_tail_not_basename():
     assert rules.file_rule("x/bar.txt") is None          # basename alone must not match
     assert rules.file_rule("xfoo/bar.txt") is None
     assert rules.file_rule("CD/SOFTWARE/EN/DATA1.CAB") == "/CD/**/*.[Cc][Aa][Bb]"
+    assert rules.file_rule("CD/TOP.CAB") is None             # matches rsync, see parity test
     assert rules.file_rule("Other/DATA1.CAB") is None
 
 
@@ -232,3 +233,28 @@ def test_checksum_dir_creation_lines_are_not_failures(tmp_path):
     assert "Users/bob/Documents/" in (dst / verify.REPORT).read_text()
     out.write_text("cd+++++++++ Users/bob/Documents/\n>fcst...... Photos/2019/IMG_0001.JPG\n")
     assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--checksum-output", str(out)]) == 1
+
+
+PARITY_FILES = ["X/top.cab", "X/sub/deep.cab", "X/sub/more/deeper.cab", "Y/a.cab",
+                "Y/X/top.cab", "Z/foo/bar.txt", "Z/q/foo/bar.txt", "foo/bar.txt", "bar.txt"]
+
+
+@needs_rsync
+@pytest.mark.parametrize("pattern", ["/X/**/*.cab", "/X/**.cab", "X/**/*.cab", "**/top.cab",
+                                     "foo/bar.txt", "/X/*.cab", "*.cab", "/X/sub/"])
+def test_rules_match_what_rsync_excludes(tmp_path, pattern):
+    """The verifier's matcher must agree with the installed rsync file by file."""
+    src = tmp_path / "src"
+    for rel in PARITY_FILES:
+        touch(src, rel)
+    out = subprocess.run(["rsync", "-rn", "--out-format=%n", f"--exclude={pattern}", f"{src}/", f"{tmp_path}/dst/"],
+                         check=True, capture_output=True, text=True).stdout.split("\n")
+    copied_by_rsync = {l for l in out if l and not l.endswith("/")}
+    rules = verify.Rules([f"- {pattern}\n"])
+
+    def kept(rel):
+        parts = rel.split("/")
+        dirs = ["/".join(parts[:i]) for i in range(1, len(parts))]
+        return not any(rules.dir_rule(d) for d in dirs) and rules.file_rule(rel) is None
+
+    assert {rel for rel in PARITY_FILES if kept(rel)} == copied_by_rsync

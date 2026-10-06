@@ -32,15 +32,13 @@ NOISE = re.compile(r"^(desktop\.ini|thumbs\.db|ehthumbs.*\.db)$", re.I)
 def glob_to_regex(glob: str) -> str:
     """rsync-style glob: '*' and '?' never cross '/', '**' does, '[..]' is a class.
 
-    '/**/' also matches a single '/', so 'a/**/b' matches 'a/b'.
+    As in rsync (unlike git), '/**/' needs at least one directory: 'a/**/b'
+    does not match 'a/b'. Write both 'a/b' and 'a/**/b' to cover every depth.
     """
     out, i = "", 0
     while i < len(glob):
         c = glob[i]
-        if glob.startswith("/**/", i):
-            out += "/(?:.*/)?"
-            i += 3
-        elif glob.startswith("**", i):
+        if glob.startswith("**", i):
             out += ".*"
             i += 1
         elif c == "*":
