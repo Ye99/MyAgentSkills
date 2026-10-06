@@ -40,6 +40,7 @@ A collection of specialized skills to extend the capabilities of AI coding agent
 - **virsh-vm-snapshots** ([`virsh-vm-snapshots/SKILL.md`](virsh-vm-snapshots/SKILL.md)): Manage external-only QEMU/KVM VM snapshots with `virsh` for UEFI-compatible backup workflows.
 - **proxmox-cross-host-migration** ([`proxmox-cross-host-migration/SKILL.md`](proxmox-cross-host-migration/SKILL.md)): Move, copy, migrate, or restore QEMU VMs, CTs, and LXC containers between standalone Proxmox VE/PVE node hosts over SSH with `vzdump`/`qmrestore`/`pct restore`, preserving VMIDs, MAC addresses, and guest config while handling VMID collisions, the PVE 9.1.x unprivileged-LXC stdin-restore quirk, `--unique` MAC safety, linked clones, and templates.
 - **obsidian-note-split** ([`obsidian-note-split/SKILL.md`](obsidian-note-split/SKILL.md)): Split an oversized Obsidian note into self-descriptive topic notes plus an index, regrouping scattered sections verbatim, rewriting heading links in and out, proving no data loss, and writing through the Obsidian CLI with post-write checks.
+- **trip-bookings-from-email** ([`trip-bookings-from-email/SKILL.md`](trip-bookings-from-email/SKILL.md)): Reconcile a trip-planning note with booking emails, recording only reservations still active (booked-then-canceled ones are paired by confirmation number and skipped) and keeping PINs and management links out of the note.
 
 ## Workflows
 
