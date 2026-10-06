@@ -1,0 +1,164 @@
+import importlib.util
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+SKILL = Path(__file__).resolve().parents[1]
+FILTER = SKILL / "scripts" / "windows-data.filter"
+spec = importlib.util.spec_from_file_location("verify_copy", SKILL / "scripts" / "verify_copy.py")
+verify = importlib.util.module_from_spec(spec)
+assert spec is not None and spec.loader is not None
+spec.loader.exec_module(verify)
+
+needs_rsync = pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync not installed")
+
+
+def touch(root: Path, rel: str, data: bytes = b"x") -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+
+
+@pytest.fixture(scope="module")
+def rules():
+    return verify.Rules.from_file(FILTER)
+
+
+@pytest.mark.parametrize(
+    ("rel", "skipped"),
+    [
+        ("pagefile.sys", True),
+        ("HIBERFIL.SYS", True),
+        ("Tools/setup.EXE", True),
+        ("Projects/app/bin/lib.Dll", True),
+        ("Photos/Thumbs.db", True),
+        ("Photos/Desktop.ini", True),
+        ("Users/alice/NTUSER.DAT", True),
+        ("Users/alice/NTUSER.DAT{guid}.TM.blf", True),
+        ("Photos/IMG_0001.JPG", False),
+        ("Users/alice/Documents/report.docx", False),
+        ("Users/alice/AppData/Local/Microsoft/Outlook/mail.pst", False),
+        ("Projects/app/installer.cab", False),
+        ("Projects/app/run.bat", False),
+    ],
+)
+def test_file_rules(rules, rel, skipped):
+    assert (rules.file_rule(rel) is not None) is skipped
+
+
+@pytest.mark.parametrize(
+    ("rel", "skipped"),
+    [
+        ("Windows", True),
+        ("Program Files", True),
+        ("Program Files (x86)", True),
+        ("ProgramData", True),
+        ("$Recycle.Bin", True),
+        ("System Volume Information", True),
+        ("Users/Default", True),
+        ("Users/alice/AppData/Local/Temp", True),
+        ("Users/alice/AppData/Local/Google/Chrome/User Data/Default/Cache", True),
+        ("Windows.old/Windows", True),
+        ("Windows.old/Users", False),
+        ("Users/alice/AppData/Roaming", False),
+        ("Users/alice/AppData/Local/Google/Chrome/User Data/Default", False),
+        ("Data/Windows", False),          # anchored: only the root Windows/ is system
+        ("Data/Program Files", False),
+        ("Users/Default Projects", False),
+    ],
+)
+def test_dir_rules(rules, rel, skipped):
+    assert (rules.dir_rule(rel) is not None) is skipped
+
+
+def build_drive(src: Path) -> None:
+    touch(src, "pagefile.sys", b"p" * 50)
+    touch(src, "Windows/System32/kernel32.dll")
+    touch(src, "Program Files (x86)/App/app.exe")
+    touch(src, "Program Files (x86)/App/manual.pdf")
+    touch(src, "Photos/2019/IMG_0001.JPG", b"jpegdata")
+    touch(src, "Photos/2019/Thumbs.db")
+    touch(src, "Projects/tool/bin/Debug/tool.exe")
+    touch(src, "Projects/tool/Program.cs", b"class P {}")
+    touch(src, "Users/alice/Documents/notes.txt", b"hello")
+    touch(src, "Users/alice/AppData/Roaming/App/profile.db", b"db")
+    touch(src, "Users/alice/AppData/Local/Temp/junk.tmp")
+    touch(src, "Users/alice/NTUSER.DAT")
+    (src / "Users/bob/Documents").mkdir(parents=True)       # only a junction inside
+    os.symlink("../Music", src / "Users/bob/Documents/My Music")
+    (src / "Empty/Nested").mkdir(parents=True)
+    os.symlink("./Users", src / "Documents and Settings")
+
+
+def rsync_copy(src: Path, dst: Path) -> None:
+    subprocess.run(
+        ["rsync", "-rt", "--no-links", "-m", f"--filter=merge {FILTER}", f"{src}/", f"{dst}/"],
+        check=True, capture_output=True,
+    )
+
+
+@needs_rsync
+def test_copy_then_verify_passes_after_pruning_empty_dirs(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    build_drive(src)
+    rsync_copy(src, dst)
+
+    assert (dst / "Photos/2019/IMG_0001.JPG").read_bytes() == b"jpegdata"
+    assert (dst / "Projects/tool/Program.cs").exists()
+    assert (dst / "Users/alice/AppData/Roaming/App/profile.db").exists()
+    for gone in ("pagefile.sys", "Windows", "Program Files (x86)", "Projects/tool/bin",
+                 "Users/alice/AppData/Local/Temp", "Users/alice/NTUSER.DAT", "Empty",
+                 "Documents and Settings"):
+        assert not (dst / gone).exists(), gone
+
+    rules = verify.Rules.from_file(FILTER)
+    r = verify.inventory(str(src), str(dst), rules)
+    # rsync -m keeps a dir whose only entry is a skipped junction
+    assert r["empty_dst"] == ["Users/bob/Documents"]
+    assert not verify.verdict(r, [])
+
+    subprocess.run(["find", str(dst), "-mindepth", "1", "-type", "d", "-empty", "-delete"], check=True)
+    r = verify.inventory(str(src), str(dst), rules)
+    assert verify.verdict(r, [])
+    assert r["copied_n"] == r["dst_n"] == 4
+    assert {rel.rstrip("/") for rel, _ in r["links"]} == {"Documents and Settings", "Users/bob/Documents/My Music"}
+
+
+@needs_rsync
+def test_report_files_and_failures(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    build_drive(src)
+    rsync_copy(src, dst)
+    subprocess.run(["find", str(dst), "-mindepth", "1", "-type", "d", "-empty", "-delete"], check=True)
+    empty = tmp_path / "checksum.txt"
+    empty.write_text("")
+
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--checksum-output", str(empty)]) == 0
+    tsv = (dst / verify.SKIPPED_TSV).read_text().splitlines()
+    assert "Projects/tool/bin/Debug/tool.exe\t1\tfile *.exe" in tsv
+    assert any(l.startswith("Windows/System32/kernel32.dll\t") for l in tsv)
+    assert "PASS" in (dst / verify.REPORT).read_text()
+
+    # Report files and the review guide in DST are not counted as extra data.
+    (dst / "agentreviewguide.md").write_text("guide")
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER)]) == 0
+
+    (dst / "Users/alice/Documents/notes.txt").unlink()
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER)]) == 1
+    assert "MISSING in destination" in (dst / verify.REPORT).read_text()
+
+    (dst / "Users/alice/Documents/notes.txt").write_text("hello")
+    (dst / "extra.txt").write_text("stray")
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER)]) == 1
+
+
+def test_checksum_differences_fail(tmp_path):
+    out = tmp_path / "c.txt"
+    out.write_text(">fc.t...... Photos/a.jpg\n")
+    diffs = verify.read_lines(str(out), lambda l: l.startswith((">f", "cd", "*deleting")))
+    r = {"problems": [], "empty_dst": [], "dst_links": [], "copied_n": 1, "dst_n": 1, "copied_b": 1, "dst_b": 1}
+    assert not verify.verdict(r, diffs)
+    assert verify.verdict(r, [])

@@ -1,0 +1,89 @@
+# rsync merge-filter for copying user data off a Windows system drive.
+# Use with: rsync -rt --no-links -m --filter='merge windows-data.filter' SRC/ DST/
+# "/x/" = directory anchored at the drive root; "*" never crosses "/".
+# Survey the drive first and add root-anchored excludes for machine-specific
+# program/driver/sandbox folders; never exclude a folder you have not looked at.
+
+# ---- Windows system / boot / recovery ----
+- /$Recycle.Bin/
+- /RECYCLER/
+- /System Volume Information/
+- /Windows/
+- /Boot/
+- /Recovery/
+- /Config.Msi/
+- /MSOCache/
+- /PerfLogs/
+- /$WINDOWS.~BT/
+- /$Windows.~WS/
+- /$WinREAgent/
+- /$SysReset/
+- /$GetCurrent/
+- /bootmgr
+- /BOOTNXT
+- /BOOTSECT.BAK
+- /DumpStack.log*
+# ---- Installed programs and program-wide data ----
+- /Program Files/
+- /Program Files (x86)/
+- /ProgramData/
+# ---- Previous install: drop its system trees, KEEP /Windows.old/Users/ ----
+- /Windows.old/Windows/
+- /Windows.old/Program Files/
+- /Windows.old/Program Files (x86)/
+- /Windows.old/ProgramData/
+- /Windows.old/$Recycle.Bin/
+# ---- Default profile, stock samples (Vista/7/8/10/11 layout) ----
+- /Users/Default/
+- /Users/Public/Music/Sample Music/
+- /Users/Public/Pictures/Sample Pictures/
+- /Users/Public/Videos/Sample Videos/
+- /Users/Public/Recorded TV/Sample Media/
+# ---- Per-profile caches (user data elsewhere in AppData is KEPT) ----
+- /Users/*/AppData/Local/Temp/
+- /Users/*/AppData/Local/Microsoft/Windows/Temporary Internet Files/
+- /Users/*/AppData/Local/Microsoft/Windows/INetCache/
+- /Users/*/AppData/Local/Microsoft/Windows/Explorer/
+- /Users/*/AppData/Local/Google/Chrome/Application/
+- /Users/*/AppData/Local/Google/Update/
+- /Users/*/AppData/Local/Google/Chrome/User Data/*/Cache/
+- /Users/*/AppData/Local/Google/Chrome/User Data/*/Code Cache/
+- /Users/*/AppData/Local/Google/Chrome/User Data/*/GPUCache/
+- /Users/*/AppData/Local/Google/Chrome/User Data/*/Media Cache/
+- /Users/*/AppData/Local/Microsoft/Edge/User Data/*/Cache/
+- /Users/*/AppData/Local/Microsoft/Edge/User Data/*/Code Cache/
+- /Users/*/AppData/Local/Mozilla/
+- /Users/*/AppData/Local/Downloaded Installations/
+- /Users/*/AppData/Local/assembly/
+# ---- XP layout (real folders on XP; junctions on Vista+ are skipped by --no-links) ----
+- /Documents and Settings/Default User/
+- /Documents and Settings/*/Local Settings/Temp/
+- /Documents and Settings/*/Local Settings/Temporary Internet Files/
+# ---- Registry hives & transaction logs, shell caches ----
+- [Nn][Tt][Uu][Ss][Ee][Rr].[Dd][Aa][Tt]*
+- [Nn][Tt][Uu][Ss][Ee][Rr].[Ii][Nn][Ii]
+- [Nn][Tt][Uu][Ss][Ee][Rr].[Pp][Oo][Ll]
+- [Uu][Ss][Rr][Cc][Ll][Aa][Ss][Ss].[Dd][Aa][Tt]*
+- *.[Rr][Ee][Gg][Tt][Rr][Aa][Nn][Ss]-[Mm][Ss]
+- *.[Bb][Ll][Ff]
+- [Ii][Cc][Oo][Nn][Cc][Aa][Cc][Hh][Ee].[Dd][Bb]
+- [Gg][Dd][Ii][Pp][Ff][Oo][Nn][Tt][Cc][Aa][Cc][Hh][Ee][Vv]1.[Dd][Aa][Tt]
+- [Tt][Hh][Uu][Mm][Bb][Ss].[Dd][Bb]
+- [Ee][Hh][Tt][Hh][Uu][Mm][Bb][Ss]*.[Dd][Bb]
+- [Dd][Ee][Ss][Kk][Tt][Oo][Pp].[Ii][Nn][Ii]
+- [Hh][Ii][Bb][Ee][Rr][Ff][Ii][Ll].[Ss][Yy][Ss]
+- [Pp][Aa][Gg][Ee][Ff][Ii][Ll][Ee].[Ss][Yy][Ss]
+- [Ss][Ww][Aa][Pp][Ff][Ii][Ll][Ee].[Ss][Yy][Ss]
+# ---- Executables / libraries / drivers / installers ----
+- *.[Ee][Xx][Ee]
+- *.[Dd][Ll][Ll]
+- *.[Ss][Yy][Ss]
+- *.[Oo][Cc][Xx]
+- *.[Dd][Rr][Vv]
+- *.[Cc][Pp][Ll]
+- *.[Ss][Cc][Rr]
+- *.[Mm][Ss][Ii]
+- *.[Mm][Ss][Pp]
+- *.[Mm][Ss][Uu]
+- *.[Mm][Uu][Ii]
+- *.[Ee][Ff][Ii]
