@@ -138,7 +138,7 @@ def test_report_files_and_failures(tmp_path):
 
     assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--checksum-output", str(empty)]) == 0
     tsv = (dst / verify.SKIPPED_TSV).read_text().splitlines()
-    assert "Projects/tool/bin/Debug/tool.exe\t1\tfile *.exe" in tsv
+    assert "Projects/tool/bin/Debug/tool.exe\t1\tfile *.exe\tExecutables / libraries / drivers / installers" in tsv
     assert any(l.startswith("Windows/System32/kernel32.dll\t") for l in tsv)
     assert "PASS" in (dst / verify.REPORT).read_text()
 
@@ -162,3 +162,73 @@ def test_checksum_differences_fail(tmp_path):
     r = {"problems": [], "empty_dst": [], "dst_links": [], "copied_n": 1, "dst_n": 1, "copied_b": 1, "dst_b": 1}
     assert not verify.verdict(r, diffs)
     assert verify.verdict(r, [])
+
+
+@pytest.mark.parametrize(
+    ("glob", "path", "matches"),
+    [
+        ("a/**/b.cab", "a/b.cab", True),
+        ("a/**/b.cab", "a/x/y/b.cab", True),
+        ("a/**/b.cab", "ab.cab", False),
+        ("a/*.cab", "a/x/b.cab", False),
+        ("**.part", "x/y/z.iso.part", True),
+    ],
+)
+def test_double_star(glob, path, matches):
+    import re
+    assert bool(re.match("^" + verify.glob_to_regex(glob) + "$", path)) is matches
+
+
+def test_unanchored_slash_pattern_matches_path_tail_not_basename():
+    rules = verify.Rules(["- foo/bar.txt\n", "- /CD/**/*.[Cc][Aa][Bb]\n"])
+    assert rules.file_rule("x/foo/bar.txt") == "foo/bar.txt"
+    assert rules.file_rule("foo/bar.txt") == "foo/bar.txt"
+    assert rules.file_rule("x/bar.txt") is None          # basename alone must not match
+    assert rules.file_rule("xfoo/bar.txt") is None
+    assert rules.file_rule("CD/SOFTWARE/EN/DATA1.CAB") == "/CD/**/*.[Cc][Aa][Bb]"
+    assert rules.file_rule("Other/DATA1.CAB") is None
+
+
+def test_categories_come_from_section_headers(rules):
+    assert rules.category["/Windows/"] == "Windows system / boot / recovery"
+    assert rules.category["*.[Ee][Xx][Ee]"] == "Executables / libraries / drivers / installers"
+
+
+@needs_rsync
+def test_links_in_excluded_trees_emptied_dirs_and_output_dir(tmp_path):
+    src, dst, out = tmp_path / "src", tmp_path / "dst", tmp_path / "review"
+    build_drive(src)
+    (src / "ProgramData").mkdir(exist_ok=True)
+    os.symlink("./x", src / "ProgramData/Templates")
+    touch(src, "Downloads/Setup.EXE")                 # folder with only an installer
+    touch(src, "Downloads/desktop.ini")
+    touch(src, "Music/desktop.ini")                   # noise-only folder: not reported
+    touch(src, "Tools/CD/SETUP.EXE")
+    touch(src, "Tools/CD/SUB/lib.dll")
+    rsync_copy(src, dst)
+    subprocess.run(["find", str(dst), "-mindepth", "1", "-type", "d", "-empty", "-delete"], check=True)
+
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--output-dir", str(out)]) == 0
+    assert not (dst / verify.REPORT).exists()
+    report = (out / verify.REPORT).read_text()
+    r = verify.inventory(str(src), str(dst), verify.Rules.from_file(FILTER))
+    assert [rel for rel, _ in r["links_excluded"]] == ["ProgramData/Templates"]
+    emptied = [d for d, _ in r["emptied_dirs"]]
+    assert emptied == ["Downloads", "Projects/tool/bin", "Tools"]
+    # only outermost absent folders: Tools/ held nothing but CD/
+    assert "Music" not in emptied and "Photos/2019" not in emptied
+    assert "`Downloads/`" in report and "ProgramData/Templates" in report
+
+
+@needs_rsync
+def test_checksum_dir_creation_lines_are_not_failures(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    build_drive(src)
+    rsync_copy(src, dst)
+    subprocess.run(["find", str(dst), "-mindepth", "1", "-type", "d", "-empty", "-delete"], check=True)
+    out = tmp_path / "checksum.txt"
+    out.write_text("cd+++++++++ Users/bob/Documents/\n")
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--checksum-output", str(out)]) == 0
+    assert "Users/bob/Documents/" in (dst / verify.REPORT).read_text()
+    out.write_text("cd+++++++++ Users/bob/Documents/\n>fcst...... Photos/2019/IMG_0001.JPG\n")
+    assert verify.main([str(src), str(dst), "--filter", str(FILTER), "--checksum-output", str(out)]) == 1

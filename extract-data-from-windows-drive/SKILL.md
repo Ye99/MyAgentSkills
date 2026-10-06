@@ -28,7 +28,7 @@ Copy everything a person made or kept off a Windows system drive. Leave out the 
      \( -iname '*.pst' -o -iname '*.doc*' -o -iname '*.xls*' -o -iname '*.jpg' -o -iname '*.mp4' \)
    ```
    Make an extension histogram of each data folder so you know which `.exe`/`.dll` files the type rules will drop.
-2. **Build the filter.** Copy `scripts/windows-data.filter` next to your scratch files. Add root-anchored excludes only for folders you inspected (see the table below). It deliberately does not exclude `/Windows.old/Users/`.
+2. **Build the filter.** Copy `scripts/windows-data.filter` next to your scratch files. Add root-anchored excludes only for folders you inspected (see the table below), each under a `# ---- Category ----` heading; the report uses the headings as the reason. It deliberately does not exclude `/Windows.old/Users/`.
 3. **Dry run** and read the totals:
    ```bash
    cd SRC && rsync -rtn --no-links -m --filter='merge FILTER' --stats -h ./ DST/
@@ -48,13 +48,15 @@ Copy everything a person made or kept off a Windows system drive. Leave out the 
    python3 scripts/verify_copy.py SRC DST --filter FILTER --checksum-output CHECKSUM \
      --rsync-output OUT --notes NOTES.md
    ```
-   `verify_copy.py` re-applies the filter itself. It checks every kept file's size and mtime, the exact count and bytes, no extra files, no empty directories and no symlinks. It writes `_COPY_REPORT.md` and `_COPY_REPORT_skipped_files.tsv` (every skipped file with its size and reason) into DST. NOTES.md holds the explanations and the user's decisions.
-7. **Hunt skipped user data.** Search the TSV for documents and media outside system and cache trees. Expect only vendor files:
+   `verify_copy.py` re-applies the filter itself (`*`, `**`, `[..]`, root anchors, path-tail patterns). It checks every kept file's size and mtime, the exact count and bytes, no extra files, no empty directories and no symlinks. It writes `_COPY_REPORT.md` and `_COPY_REPORT_skipped_files.tsv` (every skipped file with its size, rule and category) into DST, or into `--output-dir`. NOTES.md holds the explanations and the user's decisions. The checksum pass reads every byte: tens of minutes from a cold USB disk, seconds from page cache.
+7. **Show the user what the type rules took.** The report section "Folders that lost all their content to file-type rules" lists every folder that vanished because it held only executables (downloads, installer CDs, build outputs). Present that list together with the executables in their own projects, and record each decision in NOTES.md.
+8. **Hunt skipped user data.** Search the TSV for documents and media outside system and cache trees. Expect only vendor files:
    ```bash
    awk -F'\t' 'NR>1 && tolower($1) ~ /\.(docx?|xlsx?|pptx?|pdf|txt|jpe?g|png|mts|mp4|mov|mp3|pst|zip|rar)$/' DST/_COPY_REPORT_skipped_files.tsv \
      | grep -vE '^(Windows|Program Files( \(x86\))?|ProgramData|MSOCache)/|Temporary Internet Files|INetCache|/AppData/Local/Temp/|Sample (Music|Pictures|Videos|Media)'
    ```
-8. **Hand-off for review** (when asked). Put `agentreviewguide.md` in DST with these sections: the user's request and binding decisions; source and DST paths (source read-only); the files in DST; the rsync command and why each exclusion exists; checks already run with their expected outputs; a checklist of commands to re-run; rules (no writes to the source, ask before restoring anything). Copy the filter, the rsync output and `verify_copy.py` into DST as `_COPY_REPORT_*` so it is self-contained.
+9. **Offer to remove dead weight** that the type rules leave behind: installer payloads whose `Setup.exe`/`.msi` was skipped (InstallShield `Data1.cab`, `COMMON.CAB`/`LANG.CAB` in software-CD layouts, a `.cab` next to `setup.ini`), and incomplete downloads (`*.part`, `*.crdownload`). A Windows Mobile `.cab` (`*_PPC*.cab`, phone apps) is a complete package; keep it. Only after the user approves: add the paths as a `# ---- User-approved removals ----` section in the filter, list the matches in DST, delete exactly that list, prune empty folders, and re-run step 6.
+10. **Hand-off for review** (when asked). Put `agentreviewguide.md` in DST with these sections: the user's request and binding decisions; source and DST paths (source read-only); the files in DST; the rsync command and why each exclusion exists; checks already run with their expected outputs; a checklist of commands to re-run; rules (no writes to the source, ask before restoring anything). Copy the filter, the rsync output, NOTES.md and this skill's `verify_copy.py` (the same file, not a variant) into DST as `_COPY_REPORT_*` so it is self-contained. Tell the reviewer to pass `--output-dir` so the original report stays untouched.
 
 ## Where user data hides (keep)
 
@@ -86,6 +88,8 @@ Copy everything a person made or kept off a Windows system drive. Leave out the 
 | Following junctions (`-a` keeps links, `-L` duplicates) | `--no-links`; every Vista+ junction points back inside the tree or to `C:/ProgramData` |
 | Unanchored `Windows/` drops a user folder named `Windows` | Anchor system trees with a leading `/` |
 | Case-sensitive `*.exe` misses `SETUP.EXE` | Bracket patterns `*.[Ee][Xx][Ee]` (shipped filter) |
+| Counting only links outside excluded trees | The report lists both; `ProgramData/` and `Users/Default/` hold junctions too |
+| Deleting every `.cab` next to an installer | Windows Mobile `.cab` files are whole apps; only setup payloads are dead weight |
 | Report counts itself as extra data | Report files are prefixed `_COPY_REPORT`; `--ignore` adds more |
 | "error" in the rsync log treated as failure | Filenames like `error.htm` match; trust exit code + `rsync:` lines |
 | GB vs GiB mismatch confuses reviewers | Report shows exact bytes; rsync `-h` is decimal |
