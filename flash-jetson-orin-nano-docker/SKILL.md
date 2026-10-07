@@ -113,6 +113,7 @@ Then run steps 9-11.
 | NFS timeouts with UFW active | UFW drops NFS from the USB link | `host-nfs.sh up` adds a rule scoped to `fc00:1:1::/48` |
 | `Not all of the space available ... appears to be used` during flash | layout is written at 64 GB then expanded | expected; APP is grown to fill the drive |
 | `mounting ... not a directory` or empty mounts in `docker run` | snap-packaged Docker cannot see host `/tmp` | keep `$WORK` and helper files outside `/tmp` |
+| `ping: ... missing cap_net_raw` for a normal user after first boot | NVIDIA's sample rootfs tarball carries no file capabilities (seen in r39.2.1) | on the board: `sudo setcap cap_net_raw+p /usr/bin/ping` |
 | `WARNING: failed to import T264 module` | Thor-only Python module | harmless on Orin |
 | board boots straight back to recovery | J14 jumper still fitted | remove it and power-cycle |
 | `pkill -f <pattern>` kills your own shell | the pattern matches the command line running it | target processes by PID |

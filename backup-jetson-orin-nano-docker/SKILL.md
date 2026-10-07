@@ -50,7 +50,7 @@ Skip a step if it is already done (the flash skill does the same steps).
 
 ## Backup procedure
 
-Explain each step to the user before doing it; steps 1 and 6 are theirs.
+Explain each step to the user before doing it; step 1 (and the jumper, if used) is theirs.
 
 1. **Connect** a USB-C data cable from the carrier board to the host (a direct
    motherboard port works best). Ethernet can stay connected.
@@ -94,16 +94,29 @@ and move `images/*` to the destination yourself.
 
 ## Restore (erases the target drive and QSPI)
 
-Not exercised by this skill's test; follow NVIDIA's
-`$L4T/tools/backup_restore/README_backup_restore.txt` (Workflow 2):
+`restore-in-docker.sh` wraps NVIDIA's `l4t_backup_restore.sh -r` and first
+checks what NVIDIA's restore does not: every file's SHA-256 (NVIDIA never checks
+the APP `tar.zst`, and on a bad image checksum skips that partition yet still
+reports success) and that the backup's L4T release equals the BSP's.
 
-1. Same BSP release as the backup; target in recovery mode (steps 1-3 above).
-2. Copy the backup files (not the folder) into `$L4T/tools/backup_restore/images/`.
-3. Host NFS up (step 4).
-4. Run the same `docker run` as `backup-in-docker.sh`, with
-   `./tools/backup_restore/l4t_backup_restore.sh -e nvme0n1 -r <board>`.
-   The drive in the target must be at least as large as the original.
-5. Host NFS down, empty `images/`, power-cycle.
+1. Tell the user this erases the target drive and rewrites its QSPI firmware,
+   and get a yes. Then recovery mode (steps 1-3 above). A board that no longer
+   boots needs the J14 jumper.
+2. Host NFS up (step 4).
+3. `bash $SKILL/restore-in-docker.sh $L4T <board> <backup_dir> nvme0n1`
+   (~10 min). Success: `Successful restore of partitions`, `RESTORE_RC=0`,
+   `restore OK`. The backup folder is only read; its files are copied into the
+   BSP and removed afterwards. The log is saved in `<backup_dir>`.
+4. Reboot the board (step 6) and host NFS down (step 7).
+5. Check on the booted board: `systemctl is-system-running` says `running`,
+   `head -1 /etc/nv_tegra_release` and `sudo nvbootctrl dump-slots-info` show
+   the backup's release, and ssh connects without a host-key warning.
+
+The restore writes the backup's GPT verbatim, so the target drive must be at
+least as large as the source; a smaller one is not supported. On a larger one
+the extra space stays unused until you move the backup GPT and grow APP
+(`sgdisk -e`, `growpart`, `resize2fs`). APP gets a new ext4 UUID, which is
+harmless: the board boots by PARTUUID, which the GPT keeps.
 
 ## Common mistakes
 
@@ -116,11 +129,18 @@ Not exercised by this skill's test; follow NVIDIA's
 | `Failed to start nfs-server.service: Unit nfs-mountd.service is masked` | host masked NFS units | `host-nfs.sh up`/`down` unmasks and re-masks |
 | `mounting ... not a directory` in `docker run` | snap-packaged Docker cannot see host `/tmp` | keep `$WORK` and the destination outside `/tmp` |
 | `lsusb` shows `7020` | board booted normally | step 2 again |
-| restore refuses or the board will not boot after restore | BSP release differs from the backup | use the BSP release the backup was taken with |
+| `ERROR: release mismatch` | BSP release differs from the backup | use the BSP release the backup was taken with |
+| `You are trying to flash images from a board model that does not match` | backup is from another module/carrier (board_spec) | restore only onto the same board type |
+| `ping: ... missing cap_net_raw` after restore | not the restore: NVIDIA's sample rootfs ships with no file capabilities, so the board never had it | `sudo setcap cap_net_raw+p /usr/bin/ping` |
 
 ## Tested with
 
 Orin Nano 8GB Super devkit (p3767-0005), 500 GB NVMe with 7.9 GB used, Jetson
 Linux r39.2.1 (JetPack 7.2.1); host Ubuntu 26.04, Docker 29. Recovery entered
 with the jumper-free `systemctl` command, left with `reboot -f`. Backup: 2.9 GB,
-18 files incl. `QSPI0.img`, ~3 min, `VERIFY: PASS`. Restore not tested.
+18 files incl. `QSPI0.img`, ~3 min, `VERIFY: PASS`. Restore of that backup
+onto the same board (~10 min), checked before booting: all 198,850 root entries
+match the backup (content SHA-256, mode, owner, symlink targets, file
+capabilities), the 14 raw partitions and the 64 MB QSPI match byte for byte, and
+marker files written after the backup were gone. It then booted with no failed
+units, same SSH host key, firmware 39.2.1.
