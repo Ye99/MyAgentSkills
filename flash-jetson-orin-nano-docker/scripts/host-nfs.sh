@@ -2,8 +2,11 @@
 # Temporarily serve the initrd-flash images over the host's NFS server, then
 # put everything back exactly as it was.
 #
-# usage: sudo bash host-nfs.sh up <L4T_DIR>
+# usage: sudo bash host-nfs.sh up <L4T_DIR> [subdir ...]
 #        sudo bash host-nfs.sh down
+#
+# subdirs are relative to <L4T_DIR>; default tools/kernel_flash/images (flash).
+# The backup skill also exports tools/backup_restore.
 #
 # Why the host and not the container: the Jetson's flashing initrd mounts
 # <L4T_DIR>/tools/kernel_flash/images from the host at fc00:1:1:<n>::1. nfsd
@@ -14,6 +17,11 @@
 # "up" records prior state in $STATE so "down" restores it:
 #   /etc/exports contents, masked NFS units, nfs-server active state,
 #   and a UFW rule (only if UFW is active) scoped to the USB link fc00:1:1::/48.
+#
+# It also tells NetworkManager (if running) to leave the Jetson's USB network
+# interface (driver cdc_ncm) alone. Otherwise NM tries DHCP on it, gives up
+# after 45 s and flushes the fc00:1:1::1 address NVIDIA's tool assigned, so
+# the target loses NFS/ssh about a minute into a flash or backup.
 set -euo pipefail
 
 STATE=/var/tmp/jetson-flash-nfs.state
@@ -21,20 +29,23 @@ NFS_UNITS=(nfs-mountd nfs-idmapd nfsdcld rpc-statd)
 # Same options NVIDIA's l4t_kernel_flash_vars.func uses (PERMISSION_STR).
 OPTS="rw,nohide,insecure,no_subtree_check,async,no_root_squash"
 CLIENTS="fc00:1:1::/48"
+NM_CONF=/etc/NetworkManager/conf.d/99-jetson-flash-temp.conf
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
 up() {
-	local l4t images
-	l4t=$(realpath "${1:?usage: host-nfs.sh up <L4T_DIR>}")
-	images="$l4t/tools/kernel_flash/images"
+	local l4t d dirs=()
+	l4t=$(realpath "${1:?usage: host-nfs.sh up <L4T_DIR> [subdir ...]}")
+	shift
+	[ $# -gt 0 ] || set -- tools/kernel_flash/images
+	for d in "$@"; do dirs+=("$l4t/$d"); done
 	[ -e "$STATE" ] && { echo "ERROR: $STATE exists; run 'down' first" >&2; exit 1; }
 	command -v exportfs >/dev/null || { echo "ERROR: install nfs-kernel-server on the host" >&2; exit 1; }
 	if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1 ]; then
 		echo "ERROR: IPv6 is disabled; the USB link to the Jetson is IPv6-only" >&2; exit 1
 	fi
 
-	mkdir -p "$images"; chown root:root "$images"; chmod 755 "$images"
+	for d in "${dirs[@]}"; do mkdir -p "$d"; chown root:root "$d"; chmod 755 "$d"; done
 
 	: > "$STATE"
 	if [ -f /etc/exports ]; then
@@ -42,7 +53,8 @@ up() {
 	else
 		echo "exports=absent" >> "$STATE"
 	fi
-	printf '# jetson-flash (temporary)\n%s %s(%s)\n' "$images" "$CLIENTS" "$OPTS" >> /etc/exports
+	echo '# jetson-flash (temporary)' >> /etc/exports
+	for d in "${dirs[@]}"; do printf '%s %s(%s)\n' "$d" "$CLIENTS" "$OPTS" >> /etc/exports; done
 
 	local u masked=()
 	for u in "${NFS_UNITS[@]}"; do
@@ -54,13 +66,21 @@ up() {
 	echo "nfs_was_active=$(systemctl is-active nfs-server 2>/dev/null || true)" >> "$STATE"
 	systemctl restart nfs-server
 	exportfs -ra
-	showmount -e localhost | grep -qF "$images" || { echo "ERROR: export not visible" >&2; exit 1; }
+	for d in "${dirs[@]}"; do
+		showmount -e localhost | grep -qF "$d" || { echo "ERROR: export $d not visible" >&2; exit 1; }
+	done
+
+	if systemctl is-active -q NetworkManager; then
+		printf '[keyfile]\nunmanaged-devices=driver:cdc_ncm\n' > "$NM_CONF"
+		nmcli general reload conf
+		echo "nm=added" >> "$STATE"
+	fi
 
 	if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
 		ufw allow from "$CLIENTS" comment jetson-flash-temp >/dev/null
 		echo "ufw=added" >> "$STATE"
 	fi
-	echo "NFS ready: $images -> $CLIENTS"
+	echo "NFS ready: ${dirs[*]} -> $CLIENTS"
 }
 
 down() {
@@ -70,6 +90,11 @@ down() {
 	masked=$(sed -n 's/^masked=//p' "$STATE")
 	nfs_was_active=$(sed -n 's/^nfs_was_active=//p' "$STATE")
 	ufw=$(sed -n 's/^ufw=//p' "$STATE")
+
+	if grep -q '^nm=added' "$STATE"; then
+		rm -f "$NM_CONF"
+		nmcli general reload conf || true
+	fi
 
 	if [ "$ufw" = added ]; then
 		local n
@@ -99,7 +124,7 @@ down() {
 }
 
 case "${1:-}" in
-	up) up "${2:-}" ;;
+	up) shift; up "$@" ;;
 	down) down ;;
-	*) echo "usage: sudo bash host-nfs.sh up <L4T_DIR> | down" >&2; exit 2 ;;
+	*) echo "usage: sudo bash host-nfs.sh up <L4T_DIR> [subdir ...] | down" >&2; exit 2 ;;
 esac

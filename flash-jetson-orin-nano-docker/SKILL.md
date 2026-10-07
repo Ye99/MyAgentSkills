@@ -108,6 +108,7 @@ Then run steps 9-11.
 | `l4t_create_images_for_kernel_flash.sh requires root privilege` | Docker leaves `$USER` unset | `-e USER=root` (in `flash-in-docker.sh`) |
 | target dmesg `nfs: server fc00:1:1:0::1 not responding, timed out` | NVIDIA's script ran `service nfs-kernel-server restart` inside the container | `flash-in-docker.sh` shims `service`/`rpcbind`; serve NFS from the host (`host-nfs.sh`) |
 | `Failed to start nfs-server.service: Unit nfs-mountd.service is masked` | host deliberately masked NFS units | `host-nfs.sh up` unmasks and `down` re-masks them |
+| target loses NFS/ssh about a minute in; host no longer has `fc00:1:1::1` | NetworkManager tried DHCP on the Jetson's USB link (`cdc_ncm`) and flushed it after 45 s | `host-nfs.sh up` marks `driver:cdc_ncm` unmanaged; re-add the address and resume (below) |
 | NFS mount hangs although the server is fine | a stale `mount.nfs` from the failed attempt blocks new mounts on the target | `kill -9` its PID on the target before retrying |
 | NFS timeouts with UFW active | UFW drops NFS from the USB link | `host-nfs.sh up` adds a rule scoped to `fc00:1:1::/48` |
 | `Not all of the space available ... appears to be used` during flash | layout is written at 64 GB then expanded | expected; APP is grown to fill the drive |
