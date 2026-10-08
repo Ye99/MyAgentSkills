@@ -80,10 +80,13 @@ def test_unindexed_hash_duplicate_keeps_indexed_canonical_name(tmp_path: Path) -
 
     result = run_tool(tmp_path, "--apply")
 
-    assert result.returncode == 1, result.stdout + result.stderr
+    # Clean afterwards: one indexed video and no subtitles offered at all,
+    # which is not a per-item caption gap.
+    assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "006. Session.mp4").exists()
     assert not (tmp_path / "Session.mp4").exists()
     assert "DELETE duplicate: Session.mp4" in result.stdout
+    assert "SUBTITLES: none present" in result.stdout
 
 
 def test_five_digit_indexes_pair_without_conflict(tmp_path: Path) -> None:
@@ -197,3 +200,86 @@ def test_copy_suffix_with_base_sibling_but_different_content_still_conflicts(
     assert result.returncode == 2, result.stdout + result.stderr
     assert "copy-suffixed file is not a hash duplicate: 001. Talk (1).mp4" in result.stdout
     assert (tmp_path / "001. Talk (1).mp4").exists()
+
+
+def test_audio_only_course_pairs_mp3_with_subtitles(tmp_path: Path) -> None:
+    (tmp_path / "00001. Chapter 1. Meeting Postgres.mp3").write_bytes(b"audio one")
+    (tmp_path / "00001. Chapter 1. Meeting Postgres.en.srt").write_bytes(b"sub one")
+    (tmp_path / "00002. Chapter 2. Modern SQL.mp3").write_bytes(b"audio two")
+    (tmp_path / "00002. Chapter 2. Modern SQL.en.srt").write_bytes(b"sub two")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONFLICT" not in result.stdout
+    assert "PAIRS: 2 complete, 0 missing SRT, 0 missing MP4" in result.stdout
+    assert "SRT_WITHOUT_MP4: none" in result.stdout
+
+
+def test_audio_only_course_reports_index_gap(tmp_path: Path) -> None:
+    (tmp_path / "00001. First.mp3").write_bytes(b"audio one")
+    (tmp_path / "00003. Third.mp3").write_bytes(b"audio three")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "MISSING_INDEXES: 00002" in result.stdout
+
+
+def test_m4a_audio_is_recognized_as_media(tmp_path: Path) -> None:
+    (tmp_path / "001. Session.m4a").write_bytes(b"audio")
+    (tmp_path / "001. Session.en.srt").write_bytes(b"subtitle")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PAIRS: 1 complete, 0 missing SRT, 0 missing MP4" in result.stdout
+
+
+def test_space_separated_region_subtitle_is_a_language_variant(tmp_path: Path) -> None:
+    (tmp_path / "001. Keynote.mp4").write_bytes(b"video")
+    (tmp_path / "001. Keynote.en.srt").write_bytes(b"english")
+    (tmp_path / "001. Keynote.zh.srt").write_bytes(b"chinese")
+    (tmp_path / "001. Keynote.zh tw.srt").write_bytes(b"traditional chinese")
+    (tmp_path / "001. Keynote.pt br.srt").write_bytes(b"brazilian portuguese")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONFLICT" not in result.stdout
+    assert "SRT_WITHOUT_MP4: none" in result.stdout
+    assert "UNINDEXED_MEDIA: none" in result.stdout
+
+
+def test_title_ending_in_short_word_is_not_eaten_as_language(tmp_path: Path) -> None:
+    (tmp_path / "001. What is AI.mp4").write_bytes(b"video")
+    (tmp_path / "001. What is AI.en.srt").write_bytes(b"subtitle")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PAIRS: 1 complete, 0 missing SRT, 0 missing MP4" in result.stdout
+
+
+def test_title_with_no_subtitles_at_all_is_not_a_per_item_gap(tmp_path: Path) -> None:
+    for n in range(1, 4):
+        (tmp_path / f"0000{n}. Chapter {n}.mp3").write_bytes(f"audio {n}".encode())
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SUBTITLES: none present" in result.stdout
+    assert "MP4_WITHOUT_SRT: none" in result.stdout
+    assert "PAIRS: 0 complete, 0 missing SRT, 0 missing MP4" in result.stdout
+
+
+def test_partial_subtitle_coverage_is_still_reported(tmp_path: Path) -> None:
+    (tmp_path / "00001. First.mp4").write_bytes(b"video one")
+    (tmp_path / "00001. First.en.srt").write_bytes(b"subtitle one")
+    (tmp_path / "00002. Second.mp4").write_bytes(b"video two")
+
+    result = run_tool(tmp_path)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "MP4_WITHOUT_SRT: 00002. Second" in result.stdout
+    assert "SUBTITLES: none present" not in result.stdout

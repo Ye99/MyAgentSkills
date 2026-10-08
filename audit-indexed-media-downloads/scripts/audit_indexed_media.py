@@ -17,7 +17,11 @@ from typing import Callable, Iterable
 
 INDEX_RE = re.compile(r"^(?P<index>\d+)\.\s+(?P<title>.+)$")
 COPY_RE = re.compile(r"\s+\((?P<number>\d+)\)$")
-LANG_RE = re.compile(r"\.(?P<language>[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)?)$")
+LANG_RE = re.compile(r"\.(?P<language>[A-Za-z]{2,3}(?:[-_ ][A-Za-z0-9]{2,4})?)$")
+VIDEO_SUFFIXES = {".mp4"}
+AUDIO_SUFFIXES = {".mp3", ".m4a", ".m4b"}
+MEDIA_SUFFIXES = VIDEO_SUFFIXES | AUDIO_SUFFIXES
+SUBTITLE_SUFFIXES = {".srt"}
 PARTIAL_SUFFIXES = {".part", ".crdownload", ".download", ".tmp"}
 DASHES = str.maketrans({"–": "-", "—": "-", "−": "-"})
 
@@ -41,6 +45,15 @@ class Action:
     source: Path
     target: Path | None = None
     keeper: Path | None = None
+
+
+def is_media_kind(kind: str) -> bool:
+    """True for a lesson asset (video or audio), false for a subtitle.
+
+    Courses ship as video or as audiobook; both pair with subtitles the same
+    way, so every pairing rule keys off this rather than the mp4 extension.
+    """
+    return f".{kind}" in MEDIA_SUFFIXES
 
 
 def sha256(path: Path) -> str:
@@ -131,7 +144,7 @@ def inventory(directory: Path) -> list[MediaFile]:
         (
             path
             for path in directory.iterdir()
-            if path.is_file() and path.suffix.lower() in {".mp4", ".srt"}
+            if path.is_file() and path.suffix.lower() in (MEDIA_SUFFIXES | SUBTITLE_SUFFIXES)
         ),
         key=lambda path: path.name.casefold(),
     )
@@ -172,7 +185,7 @@ def plan_changes(files: list[MediaFile]) -> tuple[list[Action], list[str]]:
     indexed_videos: dict[str, list[MediaFile]] = {}
     for item in files:
         if (
-            item.kind == "mp4"
+            is_media_kind(item.kind)
             and item.index is not None
             and item.copy_number is None
             and item.path not in actions
@@ -305,7 +318,7 @@ def pair_report(files: Iterable[MediaFile]) -> tuple[list[str], list[str], list[
     videos = {
         (item.index_number, item.title_key): item
         for item in files
-        if item.kind == "mp4" and item.index_number is not None
+        if is_media_kind(item.kind) and item.index_number is not None
     }
     subtitles = {
         (item.index_number, item.title_key): item
@@ -348,7 +361,7 @@ def run_media_checks(files: Iterable[MediaFile], mode: str) -> list[str]:
     if not ffprobe:
         return ["ffprobe is unavailable"]
     errors: list[str] = []
-    videos = [item for item in files if item.kind == "mp4"]
+    videos = [item for item in files if is_media_kind(item.kind)]
     for item in videos:
         probe = subprocess.run(
             [
@@ -368,8 +381,8 @@ def run_media_checks(files: Iterable[MediaFile], mode: str) -> list[str]:
         if probe.returncode or "duration=" not in probe.stdout:
             errors.append(f"ffprobe failed: {item.path.name}")
             continue
-        if "codec_type=video" not in probe.stdout or "codec_type=audio" not in probe.stdout:
-            errors.append(f"missing audio/video stream: {item.path.name}")
+        if "codec_type=audio" not in probe.stdout:
+            errors.append(f"missing audio stream: {item.path.name}")
 
     if mode == "scan":
         ffmpeg = shutil.which("ffmpeg")
@@ -416,6 +429,15 @@ def print_report(
     print(f"ACTIONS: {len(actions)}")
 
     missing_srt, missing_mp4, missing_indexes, complete = pair_report(files)
+
+    # A title that ships no subtitles at all is not a per-item gap: audiobooks
+    # and many video editions are published without captions. Listing every
+    # asset as "missing SRT" buries real findings, so say it once instead.
+    # Partial coverage still reports each missing item.
+    has_subtitles = any(item.kind == "srt" for item in files)
+    if not has_subtitles:
+        missing_srt = []
+    print(f"SUBTITLES: {'present' if has_subtitles else 'none present'}")
     print(f"MISSING_INDEXES: {' '.join(missing_indexes) if missing_indexes else 'none'}")
     print(f"MP4_WITHOUT_SRT: {'; '.join(missing_srt) if missing_srt else 'none'}")
     print(f"SRT_WITHOUT_MP4: {'; '.join(missing_mp4) if missing_mp4 else 'none'}")
