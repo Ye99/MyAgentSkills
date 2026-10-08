@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit Indexed Media Downloads"
+  short_description: "Safely reconcile indexed MP4 and SRT downloads"
+  default_prompt: "Use $audit-indexed-media-downloads to audit this media folder, preview safe filename repairs and hash-proven deduplication, and report completeness gaps."
