@@ -78,20 +78,38 @@ Also write one SubRip sidecar for that video, in the spoken language, in the sam
 
 Format ids change per video, so do not reuse one video's ids for the channel. Use a selector that encodes the same rules: `https` `avc1` at 1080, plus the medium original AAC. Fall back to a lower `https` `avc1` height when 1080 is missing, and to a non-dubbed medium AAC when no row is labeled `original`.
 
-Put the channel in its own directory under `$HOME/Downloads`. The caption sidecars use that same directory. A bulk pass sleeps between requests so YouTube does not answer HTTP 429. Record finished videos in a video archive. That archive is not the caption archive.
+Put the channel in its own directory under `$HOME/Downloads`. The caption sidecars use that same directory. Record finished videos in a video archive. That archive is not the caption archive. Run one bulk yt-dlp at a time, and use the sleeps in [Rate limits](#rate-limits).
 
 ```bash
 SEL='bv*[height=1080][ext=mp4][vcodec^=avc1][protocol=https]+ba[acodec^=mp4a.40.2][protocol=https][format_note*=original]/bv*[height<=1080][ext=mp4][vcodec^=avc1][protocol=https]+ba[acodec^=mp4a.40.2][protocol=https][format_note*=original]/bv*[height<=1080][ext=mp4][vcodec^=avc1][protocol=https]+ba[acodec^=mp4a.40.2][protocol=https][format_note!*=DRC][format_note!*=dubbed]'
 /tmp/ytdlp-venv/bin/yt-dlp --js-runtimes "node:$NODE" \
   -f "$SEL" --merge-output-format mp4 \
   --ignore-errors --no-overwrites \
-  --sleep-requests 2 --retries 15 --retry-sleep "http:exp=2:45" \
+  -t sleep --sleep-requests 2 \
   --download-archive "$HOME/Downloads/CHANNEL/archive.txt" \
   -o "$HOME/Downloads/CHANNEL/%(title)s [%(id)s].%(ext)s" \
   "CHANNEL_VIDEOS_URL"
 ```
 
 When the user asks for a date cutoff, add `--dateafter YYYYMMDD` and `--break-match-filters "upload_date >= YYYYMMDD"`. The videos tab is newest-first, so the break stops the walk at the first older video. Do not put a language test in `--break-match-filters`.
+
+## Rate limits
+
+One bulk yt-dlp at a time. A second channel download, or a caption pass beside a video download, is what gets the session blocked. Five at once returns HTTP 403 after a few megabytes of a file that downloads fine alone. Caption passes on top of video downloads return HTTP 429.
+
+Space every bulk command the way YouTube's own rate-limit error asks. `-t sleep` is that preset: 10 to 20 seconds before each download, and 5 seconds before each subtitle. Also pass `--sleep-requests 2`, which is slower than the preset's 0.75-second request gap. Keep the download archive so a resume does not request finished videos again.
+
+`--ignore-errors` is for one members-only video or one removed video. Stop the process on any of these:
+
+- `rate-limited by YouTube`
+- `Sign in to confirm you're not a bot`
+- HTTP 429
+- HTTP 403 on the media URL
+- a run of `Video unavailable` that starts right after one of those
+
+Those are the session, not the video. `--ignore-errors` will walk the rest of the channel, the date cutoff never sees an upload date, and the block gets worse. A resume in that same hour saves nothing. Wait at least an hour, then start one archive resume. Do not start another channel during the wait.
+
+A bot check names `--cookies-from-browser`. Use that only after the user agrees. Do not print cookie values. If decryption fails, stop. Do not try the next browser.
 
 ## Matching-language captions
 
@@ -147,16 +165,16 @@ On a channel, `--sub-langs` cannot change per video. Make one pass per spoken la
   --sub-langs "zh-Hant" --sub-format srt \
   --match-filters "language ^= zh-Hant" --match-filters "language = zh-TW" \
   --ignore-errors --no-overwrites \
-  --sleep-requests 2 --retries 15 --retry-sleep "http:exp=2:45" \
+  -t sleep --sleep-requests 2 \
   --download-archive "$HOME/Downloads/CHANNEL/subs-zh-Hant.archive.txt" \
   --force-write-archive \
   -o "$HOME/Downloads/CHANNEL/%(title)s [%(id)s].%(ext)s" \
   "CHANNEL_VIDEOS_URL"
 ```
 
-Repeat that command, still including `--force-write-archive`, with `--sub-langs "en-orig"` and `--match-filters "language ^= en"`, and with `--sub-langs "zh-Hans"` for `zh-Hans`, `zh-CN`, and exact `zh`. Several subtitle passes at once, on top of video downloads, get HTTP 429. Run one caption pass at a time and keep the sleep.
+Repeat that command, still including `--force-write-archive` and `-t sleep`, with `--sub-langs "en-orig"` and `--match-filters "language ^= en"`, and with `--sub-langs "zh-Hans"` for `zh-Hans`, `zh-CN`, and exact `zh`. Run one caption pass at a time, and not while a channel video download is running. See [Rate limits](#rate-limits).
 
-After each pass, rename `Title [id].zh-Hant.srt`, `Title [id].zh-Hans.srt`, or `Title [id].en-orig.srt` to `Title [id].srt` when that video has one spoken language. Report the renamed path. A 429 on one video is a retry, not a reason to switch that video to another language.
+After each pass, rename `Title [id].zh-Hant.srt`, `Title [id].zh-Hans.srt`, or `Title [id].en-orig.srt` to `Title [id].srt` when that video has one spoken language. Report the renamed path.
 
 ## Transcript note
 

@@ -22,7 +22,7 @@
     {
       "id": 4,
       "prompt": "Download the videos and matching captions from this channel: https://www.youtube.com/@example/videos",
-      "expected_output": "Each video is an mp4 in one channel directory under $HOME/Downloads, recorded in that directory's video archive. Each video has one SubRip .srt file in that same directory, named exactly like the mp4 so VLC autoloads it. The track is chosen before that rename: English uses en-orig, Traditional Chinese uses zh-Hant, Simplified Chinese uses zh-Hans. Translation tracks are not downloaded. A video in another language is skipped, not used to stop the channel. The caption pass uses its own archive and --force-write-archive, because --skip-download otherwise writes no archive entry.",
+      "expected_output": "Each video is an mp4 in one channel directory under $HOME/Downloads, recorded in that directory's video archive. Each video has one SubRip .srt file in that same directory, named exactly like the mp4 so VLC autoloads it. The track is chosen before that rename: English uses en-orig, Traditional Chinese uses zh-Hant, Simplified Chinese uses zh-Hans. Translation tracks are not downloaded. A video in another language is skipped, not used to stop the channel. The caption pass uses its own archive and --force-write-archive, because --skip-download otherwise writes no archive entry. One bulk yt-dlp runs at a time, with -t sleep. A rate-limit or bot-check stops the run; it does not keep walking the channel.",
       "files": []
     }
   ]
