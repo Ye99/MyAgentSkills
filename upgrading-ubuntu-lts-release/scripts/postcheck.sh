@@ -15,7 +15,12 @@ for k in $(ls /boot/vmlinuz-* | sed 's#.*/vmlinuz-##'); do
   [ -f "/boot/initrd.img-$k" ] && ok "initrd for $k" || fail "no initrd for $k"
   if command -v zfs >/dev/null; then
     find "/lib/modules/$k" -name 'zfs.ko*' | grep -q . && ok "zfs module for $k" || fail "no zfs module for $k"
-    [ "$(findmnt -no FSTYPE /)" = zfs ] && { S lsinitramfs "/boot/initrd.img-$k" | grep -q 'zfs\.ko' && ok "zfs in initrd $k" || fail "zfs missing from initrd $k (ZFS root!)"; }
+    if [ "$(findmnt -no FSTYPE /)" = zfs ]; then
+      ird=$(S lsinitramfs "/boot/initrd.img-$k")
+      for want in 'zfs\.ko' 'scripts/zfs$' 'sbin/zpool$' 'sbin/mount\.zfs$'; do
+        grep -qE "$want" <<<"$ird" && ok "initrd $k has $want" || fail "initrd $k lacks $want (ZFS root will not import)"
+      done
+    fi
   fi
 done
 cfg=$(S grep -m1 -E "^\s*linux\s" /boot/grub/grub.cfg | awk '{print $2}')

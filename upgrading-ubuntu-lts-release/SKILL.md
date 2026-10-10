@@ -23,7 +23,7 @@ Scripts live in `scripts/`; run host-side ones with `ssh <host> 'bash -s' < scri
    sudo env -u DISPLAY -u WAYLAND_DISPLAY tmux new-session -d -s upgrade \
      'systemd-inhibit --what=sleep:idle:shutdown --why=dist-upgrade do-release-upgrade -f DistUpgradeViewText; exec bash'
    ```
-   Desktop: never launch from a GUI terminal — the display manager restart kills it.
+   Desktop: never launch from a GUI terminal — the display manager restart kills it. Reattach from a TTY with `sudo tmux attach -t upgrade`.
 4. **Watch** from the workstation: `bash scripts/watch.sh <host>` (run in background). It exits when the pane sits on a prompt or the upgrader exits. Answer with `sudo tmux send-keys -t upgrade <answer> Enter`.
 5. **Answer prompts** with the table below.
 6. **Pre-reboot gate:** `postcheck.sh pre`. Reboot only when every line passes; a remote-only machine with no console must pass the network and SSH lines.
