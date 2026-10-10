@@ -39,7 +39,7 @@ Scripts live in `scripts/`; run host-side ones with `ssh <host> 'bash -s' < scri
 | `Do you want to start the upgrade?` | y **after** `plan-check.sh` | The counts must match; `Remove` must not contain the ZFS userspace, `initramfs-tools`, GRUB/shim, `openssh-server`, the network stack or `tmux` |
 | Conffile `Y/I/N/O/D/Z` | Diff first (`D`). Keep local (N) when it carries real settings (Samba shares, libvirt socket perms, a vendor block in `/etc/services`); take maintainer (Y) when local is stock or only cosmetic | An unanswered prompt stalls the run silently |
 | `Remove obsolete packages?` | **N** | Lists fallback kernels before the new one has booted, and third-party `.deb`s that are only "obsolete" because they are not in the archive |
-| `Restart required` | y after `postcheck.sh pre` passes | |
+| `Restart required` | y after the `MODE=pre` postcheck passes | |
 
 ## Common Mistakes
 
