@@ -1,0 +1,4 @@
+interface:
+  display_name: "Google Maps Travel Times"
+  short_description: "Trip-day drive, transit, bike and walk estimates from Google Maps"
+  default_prompt: "Use $google-maps-travel-times to estimate every leg of my itinerary for its actual weekday and departure time."
