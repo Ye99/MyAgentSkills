@@ -1,0 +1,4 @@
+interface:
+  display_name: "Find Local Food"
+  short_description: "Verify local food, meal plans and optional Maps saves"
+  default_prompt: "Use $find-local-food to find verified local food along my itinerary, check award status and exact branches, and build a sourced meal plan."
