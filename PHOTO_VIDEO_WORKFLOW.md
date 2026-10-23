@@ -87,6 +87,9 @@ python3 scripts/organize_media_by_local_date.py "<source_root>" "<destination_ro
      `--recording-timezone` is given.
 - `--recording-timezone` is **required** if any file in the source lacks GPS (the script pre-scans
   and fails fast); optional if every file has GPS.
+- `--camera-timezone` corrects a camera clock left on the wrong zone (e.g. a GoPro still on home
+  time). Give it the zone the camera was set to, alongside `--recording-timezone` for where you
+  actually were. GPS-timed photos are unaffected.
 - Classifies files by real MIME/FileType (via metadata/`ffprobe`), not by extension, so
   misnamed or extensionless media isn't lost. Unknown signatures are auto-triaged with `ffprobe`
   and cached; unresolved ones default to "keep as media candidate" to avoid data loss.

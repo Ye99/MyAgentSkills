@@ -220,49 +220,66 @@ def parse_gps_utc_datetime(date_text: str | None, time_text: str | None) -> date
     return None
 
 
-def _get_first_exif_datetime(record: dict[str, Any]) -> tuple[datetime | None, str | None]:
+def _get_first_exif_datetime(record: dict[str, Any]) -> tuple[datetime | None, str | None, bool]:
+    """Return (datetime, source field, offset_is_inline).
+
+    offset_is_inline is True when the offset came from the value itself. With
+    QuickTimeUTC=1 that means exiftool read the raw QuickTime value as UTC and
+    shifted it to the system timezone.
+    """
     for field, offset_field in EXIF_CAPTURE_FIELDS:
         value = record.get(field)
         offset = record.get(offset_field) if offset_field else None
         parsed = parse_exif_datetime(value, offset)
         if parsed is not None:
-            return parsed, field
-    return None, None
+            bare = parse_exif_datetime(value)
+            return parsed, field, bare is not None and bare.tzinfo is not None
+    return None, None, False
 
 
 def _resolve_embedded_capture_datetime(
     record: dict[str, Any],
     timezone_lookup: Callable[[float, float], str | None],
     recording_tz: ZoneInfo | None = None,
+    camera_tz: ZoneInfo | None = None,
 ) -> tuple[datetime, str, str | None] | None:
     lat = record.get("GPSLatitude")
     lon = record.get("GPSLongitude")
     lat_lon_available = lat is not None and lon is not None
 
-    exif_dt, exif_source = _get_first_exif_datetime(record)
+    exif_dt, exif_source, offset_is_inline = _get_first_exif_datetime(record)
     if exif_dt is None:
         return None
 
-    if exif_dt.tzinfo is not None:
-        if lat_lon_available:
+    if exif_dt.tzinfo is None:
+        gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
+        if gps_utc is not None and lat_lon_available:
             timezone_name = timezone_lookup(float(lat), float(lon))
             if timezone_name:
-                local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
-                return local_dt, f"{exif_source}-offset-converted", timezone_name
-        if recording_tz is not None:
-            local_dt = exif_dt.astimezone(recording_tz).replace(tzinfo=None)
-            return local_dt, f"{exif_source}-recording-tz-converted", str(recording_tz)
-        return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
+                local_dt = gps_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+                return local_dt, "gps-utc-converted", timezone_name
+            return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
+        if camera_tz is None:
+            return exif_dt, f"{exif_source}-naive-local", None
+        # The naive value is the camera clock's wall time in camera_tz.
+        exif_dt = exif_dt.replace(tzinfo=camera_tz)
+        exif_source = f"{exif_source}-camera-tz"
+    elif camera_tz is not None and offset_is_inline:
+        # Recover the raw QuickTime wall time (exiftool treated it as UTC),
+        # then read it as camera-clock time in camera_tz.
+        raw_wall = exif_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        exif_dt = raw_wall.replace(tzinfo=camera_tz)
+        exif_source = f"{exif_source}-camera-tz"
 
-    gps_utc = parse_gps_utc_datetime(record.get("GPSDateStamp"), record.get("GPSTimeStamp"))
-    if gps_utc is not None and lat_lon_available:
+    if lat_lon_available:
         timezone_name = timezone_lookup(float(lat), float(lon))
         if timezone_name:
-            local_dt = gps_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
-            return local_dt, "gps-utc-converted", timezone_name
-        return gps_utc.replace(tzinfo=None), "gps-utc-no-timezone", None
-
-    return exif_dt, f"{exif_source}-naive-local", None
+            local_dt = exif_dt.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+            return local_dt, f"{exif_source}-offset-converted", timezone_name
+    if recording_tz is not None:
+        local_dt = exif_dt.astimezone(recording_tz).replace(tzinfo=None)
+        return local_dt, f"{exif_source}-recording-tz-converted", str(recording_tz)
+    return exif_dt.replace(tzinfo=None), f"{exif_source}-offset-kept", None
 
 
 def _parse_sequence_name(path: Path) -> tuple[str, int] | None:
@@ -277,6 +294,7 @@ def build_sequence_capture_overrides(
     timezone_lookup: Callable[[float, float], str | None],
     recording_tz: ZoneInfo | None = None,
     max_sequence_gap: int = 3,
+    camera_tz: ZoneInfo | None = None,
 ) -> dict[str, tuple[datetime, str, str | None]]:
     anchors_by_group: dict[tuple[str, str, str], list[tuple[int, int, tuple[datetime, str, str | None]]]] = {}
     parsed_records: list[tuple[dict[str, Any], Path, tuple[str, int] | None]] = []
@@ -287,7 +305,7 @@ def build_sequence_capture_overrides(
         parsed_records.append((record, source_path, seq))
         if seq is None:
             continue
-        embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz)
+        embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz, camera_tz)
         if embedded is None:
             continue
         prefix, number = seq
@@ -301,7 +319,7 @@ def build_sequence_capture_overrides(
         source_key = str(source_path)
         if source_key in overrides:
             continue
-        if _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz) is not None:
+        if _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz, camera_tz) is not None:
             continue
 
         prefix, number = seq
@@ -328,8 +346,9 @@ def resolve_capture_datetime(
     mtime_dt: datetime,
     timezone_lookup: Callable[[float, float], str | None],
     recording_tz: ZoneInfo | None = None,
+    camera_tz: ZoneInfo | None = None,
 ) -> tuple[datetime, str, str | None]:
-    embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz)
+    embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz, camera_tz)
     if embedded is not None:
         return embedded
 
@@ -680,6 +699,13 @@ def main() -> int:
         help="IANA timezone where media was recorded (e.g. Asia/Shanghai, America/Los_Angeles). "
              "Required when any media file lacks GPS coordinates.",
     )
+    parser.add_argument(
+        "--camera-timezone",
+        default=None,
+        help="IANA timezone the camera clock was set to, when it differs from where media was "
+             "recorded (e.g. a GoPro left on home time). Corrects embedded timestamps that are "
+             "not backed by GPS time. Requires --recording-timezone.",
+    )
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="Hash workers for verification")
     parser.add_argument("--verbose", action="store_true", help="Verbose verification logs")
     parser.add_argument("--apply", action="store_true", help="Apply copy actions")
@@ -698,6 +724,17 @@ def main() -> int:
             print(f"Invalid recording timezone: {args.recording_timezone!r}. Use an IANA timezone like 'Asia/Shanghai'.", file=sys.stderr)
             return 2
 
+    camera_tz: ZoneInfo | None = None
+    if args.camera_timezone is not None:
+        if recording_tz is None:
+            print("--camera-timezone requires --recording-timezone.", file=sys.stderr)
+            return 2
+        try:
+            camera_tz = ZoneInfo(args.camera_timezone)
+        except (KeyError, ValueError):
+            print(f"Invalid camera timezone: {args.camera_timezone!r}. Use an IANA timezone like 'America/Los_Angeles'.", file=sys.stderr)
+            return 2
+
     if not source_root.is_dir():
         print(f"Source root not found: {source_root}", file=sys.stderr)
         return 2
@@ -711,6 +748,7 @@ def main() -> int:
         records=records,
         timezone_lookup=timezone_lookup,
         recording_tz=recording_tz,
+        camera_tz=camera_tz,
     )
 
     missing_gps_count = count_media_missing_gps(records)
@@ -793,6 +831,7 @@ def main() -> int:
                 mtime_dt=mtime_dt,
                 timezone_lookup=timezone_lookup,
                 recording_tz=recording_tz,
+                camera_tz=camera_tz,
             )
 
         year_folder = capture_dt.strftime("%Y")

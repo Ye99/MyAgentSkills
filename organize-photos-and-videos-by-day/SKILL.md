@@ -33,12 +33,13 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 6. If EXIF datetime has offset but no GPS, convert to recording-timezone (handles QuickTimeUTC system-tz mismatch).
 7. If EXIF datetime is naive and GPS UTC tags do not exist, keep EXIF datetime as local-naive.
 8. If the script falls back to file creation time or file mtime and `--recording-timezone` is provided, do not timezone-convert those filesystem timestamps; preserve their wall-clock date/time as recording-local fallback values.
-9. If a media file lacks embedded capture datetime but an adjacent same-sequence sibling in the same folder has one, prefer that sibling's embedded local capture datetime over filesystem timestamps.
-10. Copy media without metadata rewrite (high-fidelity copy), never move/delete source.
-11. Collision policy: deterministic suffix `_col001`, `_col002`, ... (name collision, different content)
-12. Do not hardcode media extensions. Classify via metadata MIME/FileType.
-13. Unknown signatures are cached; unresolved unknown signatures default to media-candidate to avoid loss.
-14. Explicit non-media exclusions (never copied, never signature-looked-up):
+9. If `--camera-timezone` is given (camera clock set to a different zone than where media was recorded, e.g. a GoPro left on home time), read embedded timestamps not backed by GPS time as camera-clock wall time in that zone, then convert to the recording timezone. This covers naive EXIF times and QuickTime times (exiftool reads the raw value as UTC; the script recovers the raw value first). EXIF times that carry their own `OffsetTime*` tag and GPS UTC times are left unchanged.
+10. If a media file lacks embedded capture datetime but an adjacent same-sequence sibling in the same folder has one, prefer that sibling's embedded local capture datetime over filesystem timestamps.
+11. Copy media without metadata rewrite (high-fidelity copy), never move/delete source.
+12. Collision policy: deterministic suffix `_col001`, `_col002`, ... (name collision, different content)
+13. Do not hardcode media extensions. Classify via metadata MIME/FileType.
+14. Unknown signatures are cached; unresolved unknown signatures default to media-candidate to avoid loss.
+15. Explicit non-media exclusions (never copied, never signature-looked-up):
    - `*.url`
    - `*.ini`
    - `*.bk`
@@ -75,6 +76,7 @@ python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to
 Optional:
 
 - `--recording-timezone <IANA>` — timezone where media was recorded (e.g. `Asia/Shanghai`). Required when media files lack GPS; script scans and exits with count if needed.
+- `--camera-timezone <IANA>` — timezone the camera clock was set to, when it differs from `--recording-timezone` (e.g. GoPro left on `America/Los_Angeles` while filming in `Asia/Shanghai`). Requires `--recording-timezone`. Both zones are needed: the camera stores only a wall-clock reading, and the correction is the gap between the two zones.
 - `--signature-cache <path>`
 - `--workers <n>`
 - `--verbose`

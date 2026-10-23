@@ -482,5 +482,122 @@ class IdempotentCopyTests(unittest.TestCase):
             self.assertIsNone(result)
 
 
+
+# --- --camera-timezone: camera clock set to a different zone than the recording location ---
+
+import pytest
+
+NO_TZ_LOOKUP = lambda _lat, _lon: None  # noqa: E731
+SEATTLE = ZoneInfo("America/Los_Angeles")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _resolve(record, camera_tz, timezone_lookup=NO_TZ_LOOKUP):
+    return mod.resolve_capture_datetime(
+        record=record,
+        creation_dt=None,
+        mtime_dt=datetime(2000, 1, 1),
+        timezone_lookup=timezone_lookup,
+        recording_tz=SHANGHAI,
+        camera_tz=camera_tz,
+    )
+
+
+def test_camera_tz_corrects_quicktime_value():
+    # GoPro left on Seattle time films at 2025-12-31 11:07 in Shanghai.
+    # Its clock reads 2025-12-30 19:07 and it stores that raw in QuickTime CreateDate.
+    # exiftool (QuickTimeUTC=1, system tz UTC) reports it as 19:07+00:00.
+    record = {"CreateDate": "2025:12:30 19:07:06+00:00"}
+
+    without = _resolve(record, camera_tz=None)
+    assert without[0] == datetime(2025, 12, 31, 3, 7, 6)  # wrong: raw value taken as UTC
+
+    resolved, source, tz_name = _resolve(record, camera_tz=SEATTLE)
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+    assert source == "CreateDate-camera-tz-recording-tz-converted"
+    assert tz_name == "Asia/Shanghai"
+
+
+@pytest.mark.parametrize("system_offset", ["-08:00", "+05:30"])
+def test_camera_tz_result_independent_of_exiftool_system_tz(system_offset):
+    # Same raw 19:07 value, as exiftool would print it on hosts in other zones.
+    raw_utc = datetime(2025, 12, 30, 19, 7, 6, tzinfo=mod.timezone.utc)
+    hours, minutes = int(system_offset[:3]), int(system_offset[0] + system_offset[4:])
+    shown = raw_utc.astimezone(mod.timezone(timedelta(hours=hours, minutes=minutes)))
+    record = {"CreateDate": shown.strftime("%Y:%m:%d %H:%M:%S%z")}
+
+    resolved, _, _ = _resolve(record, camera_tz=SEATTLE)
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+
+
+def test_camera_tz_corrects_naive_photo_without_gps():
+    record = {"DateTimeOriginal": "2025:12:30 19:07:06"}
+
+    assert _resolve(record, camera_tz=None)[0] == datetime(2025, 12, 30, 19, 7, 6)
+
+    resolved, source, _ = _resolve(record, camera_tz=SEATTLE)
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+    assert source == "DateTimeOriginal-camera-tz-recording-tz-converted"
+
+
+def test_camera_tz_does_not_override_gps_utc_time():
+    record = {
+        "DateTimeOriginal": "2025:12:30 19:07:06",
+        "GPSDateStamp": "2025:12:31",
+        "GPSTimeStamp": "03:07:06",
+        "GPSLatitude": 31.23,
+        "GPSLongitude": 121.47,
+    }
+
+    resolved, source, tz_name = _resolve(record, camera_tz=SEATTLE, timezone_lookup=lambda _a, _b: "Asia/Shanghai")
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+    assert source == "gps-utc-converted"
+    assert tz_name == "Asia/Shanghai"
+
+
+def test_camera_tz_ignores_exif_offset_tags():
+    # A camera that wrote OffsetTimeOriginal already knew its zone; the instant is right.
+    record = {"DateTimeOriginal": "2025:12:30 19:07:06", "OffsetTimeOriginal": "-08:00"}
+
+    resolved, source, _ = _resolve(record, camera_tz=SEATTLE)
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+    assert "camera-tz" not in source
+
+
+def test_camera_tz_applies_to_sequence_neighbor_overrides():
+    records = [
+        {"SourceFile": "/mnt/DCIM/100GOPRO/GX011737.MP4"},
+        {"SourceFile": "/mnt/DCIM/100GOPRO/GX011738.MP4", "CreateDate": "2025:12:30 19:07:06+00:00"},
+    ]
+
+    overrides = mod.build_sequence_capture_overrides(
+        records=records,
+        timezone_lookup=NO_TZ_LOOKUP,
+        recording_tz=SHANGHAI,
+        camera_tz=SEATTLE,
+    )
+
+    resolved, source, _ = overrides["/mnt/DCIM/100GOPRO/GX011737.MP4"]
+    assert resolved == datetime(2025, 12, 31, 11, 7, 6)
+    assert "camera-tz" in source
+
+
+def test_camera_timezone_requires_recording_timezone(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["prog", str(tmp_path), str(tmp_path / "out"), "--camera-timezone", "America/Los_Angeles"])
+
+    assert mod.main() == 2
+    assert "--camera-timezone requires --recording-timezone" in capsys.readouterr().err
+
+
+def test_camera_timezone_rejects_invalid_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "prog", str(tmp_path), str(tmp_path / "out"),
+        "--recording-timezone", "Asia/Shanghai", "--camera-timezone", "Not/AZone",
+    ])
+
+    assert mod.main() == 2
+    assert "Invalid camera timezone" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     unittest.main()
