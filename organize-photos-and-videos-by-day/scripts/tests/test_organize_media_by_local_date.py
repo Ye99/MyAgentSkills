@@ -302,7 +302,7 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
         records = [
             # media with GPS — should not count
             {"SourceFile": "/tmp/a.jpg", "MIMEType": "image/jpeg",
-             "GPSLatitude": 47.6, "GPSLongitude": -122.1},
+             "GPSLatitude": 37.8199, "GPSLongitude": -122.4783},
             # media without GPS — should count
             {"SourceFile": "/tmp/b.mp4", "MIMEType": "video/mp4"},
             # non-media (explicit exclusion) — should not count
@@ -316,7 +316,7 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
     def test_count_media_missing_gps_returns_zero_when_all_have_gps(self) -> None:
         records = [
             {"SourceFile": "/tmp/a.jpg", "MIMEType": "image/jpeg",
-             "GPSLatitude": 47.6, "GPSLongitude": -122.1},
+             "GPSLatitude": 37.8199, "GPSLongitude": -122.4783},
             {"SourceFile": "/tmp/b.mov", "MIMEType": "video/quicktime",
              "GPSLatitude": 31.2, "GPSLongitude": 121.5},
         ]
