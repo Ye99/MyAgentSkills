@@ -26,6 +26,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 3. A pre-scan checks if any media files lack GPS. If so, `--recording-timezone` is required (fail-fast). If all media have GPS, the flag is optional.
 4. Timestamp fallback chain:
    - EXIF/media capture datetime (with GPS or recording-timezone conversion)
+   - same-folder, same-stem file with embedded capture datetime (sidecars such as GoPro `.THM`)
    - nearest adjacent same-sequence media file with embedded capture datetime (bounded same-folder filename heuristic)
    - file creation time (treated as recording-local wall time when `--recording-timezone` is provided)
    - file mtime (treated as recording-local wall time when `--recording-timezone` is provided)
@@ -34,7 +35,7 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 7. If EXIF datetime is naive and GPS UTC tags do not exist, keep EXIF datetime as local-naive.
 8. If the script falls back to file creation time or file mtime and `--recording-timezone` is provided, do not timezone-convert those filesystem timestamps; preserve their wall-clock date/time as recording-local fallback values.
 9. If `--camera-timezone` is given (camera clock set to a different zone than where media was recorded, e.g. a GoPro left on home time), read embedded timestamps not backed by GPS time as camera-clock wall time in that zone, then convert to the recording timezone. This covers naive EXIF times and QuickTime times (exiftool reads the raw value as UTC; the script recovers the raw value first). EXIF times that carry their own `OffsetTime*` tag and GPS UTC times are left unchanged.
-10. If a media file lacks embedded capture datetime but an adjacent same-sequence sibling in the same folder has one, prefer that sibling's embedded local capture datetime over filesystem timestamps.
+10. If a media file lacks embedded capture datetime, borrow one before using filesystem timestamps: first from a same-folder file with the same stem (e.g. GoPro `GX010001.THM` takes `GX010001.MP4`'s corrected time; case-insensitive; ties pick the lowest extension), else from the nearest same-extension sibling in the same numbered sequence.
 11. Copy media without metadata rewrite (high-fidelity copy), never move/delete source.
 12. Collision policy: deterministic suffix `_col001`, `_col002`, ... (name collision, different content)
 13. Do not hardcode media extensions. Classify via metadata MIME/FileType.

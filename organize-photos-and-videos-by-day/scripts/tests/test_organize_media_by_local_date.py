@@ -599,5 +599,79 @@ def test_camera_timezone_rejects_invalid_name(tmp_path, monkeypatch, capsys):
     assert "Invalid camera timezone" in capsys.readouterr().err
 
 
+
+# --- same-stem sidecars (e.g. GoPro .THM) borrow the matching clip's embedded time ---
+
+def _overrides(records, camera_tz=None):
+    return mod.build_sequence_capture_overrides(
+        records=records,
+        timezone_lookup=NO_TZ_LOOKUP,
+        recording_tz=SHANGHAI,
+        camera_tz=camera_tz,
+    )
+
+
+def test_thm_reuses_matching_clip_time_with_camera_tz():
+    records = [
+        {"SourceFile": "/mnt/DCIM/100GOPRO/GX010001.THM"},
+        {"SourceFile": "/mnt/DCIM/100GOPRO/GX010001.MP4", "CreateDate": "2025:06:01 03:00:00+00:00"},
+    ]
+
+    resolved, source, tz_name = _overrides(records, camera_tz=SEATTLE)["/mnt/DCIM/100GOPRO/GX010001.THM"]
+    assert resolved == datetime(2025, 6, 1, 18, 0, 0)
+    assert source == "same-stem-CreateDate-camera-tz-recording-tz-converted"
+    assert tz_name == "Asia/Shanghai"
+
+
+def test_same_stem_beats_sequence_neighbor():
+    records = [
+        {"SourceFile": "/mnt/d/GX0001.WAV"},
+        {"SourceFile": "/mnt/d/GX0001.MP4", "DateTimeOriginal": "2025:06:01 10:00:00"},
+        {"SourceFile": "/mnt/d/GX0002.WAV", "DateTimeOriginal": "2025:06:05 10:00:00"},
+    ]
+
+    resolved, source, _ = _overrides(records)["/mnt/d/GX0001.WAV"]
+    assert resolved == datetime(2025, 6, 1, 10, 0, 0)
+    assert source.startswith("same-stem-")
+
+
+def test_same_stem_matches_case_insensitively_and_non_sequence_names():
+    records = [
+        {"SourceFile": "/mnt/d/img_1234.aae"},
+        {"SourceFile": "/mnt/d/IMG_1234.HEIC", "DateTimeOriginal": "2025:06:01 10:00:00"},
+    ]
+
+    assert _overrides(records)["/mnt/d/img_1234.aae"][0] == datetime(2025, 6, 1, 10, 0, 0)
+
+
+def test_same_stem_requires_same_folder():
+    records = [
+        {"SourceFile": "/mnt/a/CLIP.THM"},
+        {"SourceFile": "/mnt/b/CLIP.MP4", "DateTimeOriginal": "2025:06:01 10:00:00"},
+    ]
+
+    assert "/mnt/a/CLIP.THM" not in _overrides(records)
+
+
+def test_same_stem_does_not_override_files_with_their_own_time():
+    records = [
+        {"SourceFile": "/mnt/d/GL0001.LRV", "CreateDate": "2025:06:01 03:00:00+00:00"},
+        {"SourceFile": "/mnt/d/GL0001.MP4", "CreateDate": "2025:06:02 03:00:00+00:00"},
+    ]
+
+    assert _overrides(records) == {}
+
+
+def test_same_stem_pick_is_deterministic():
+    records = [
+        {"SourceFile": "/mnt/d/C1.THM"},
+        {"SourceFile": "/mnt/d/C1.WAV", "DateTimeOriginal": "2025:06:02 10:00:00"},
+        {"SourceFile": "/mnt/d/C1.MP4", "DateTimeOriginal": "2025:06:01 10:00:00"},
+    ]
+
+    assert _overrides(records)["/mnt/d/C1.THM"][0] == datetime(2025, 6, 1, 10, 0, 0)  # ".mp4" < ".wav"
+    assert _overrides(list(reversed(records)))["/mnt/d/C1.THM"][0] == datetime(2025, 6, 1, 10, 0, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

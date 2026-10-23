@@ -296,32 +296,46 @@ def build_sequence_capture_overrides(
     max_sequence_gap: int = 3,
     camera_tz: ZoneInfo | None = None,
 ) -> dict[str, tuple[datetime, str, str | None]]:
+    """Borrow embedded capture times for files that have none.
+
+    First choice: a same-folder file with the same stem (e.g. GX010001.THM
+    takes GX010001.MP4's time). Fallback: the nearest same-extension file in
+    the same numbered sequence, within max_sequence_gap.
+    """
     anchors_by_group: dict[tuple[str, str, str], list[tuple[int, int, tuple[datetime, str, str | None]]]] = {}
-    parsed_records: list[tuple[dict[str, Any], Path, tuple[str, int] | None]] = []
+    anchors_by_stem: dict[tuple[str, str], list[tuple[str, tuple[datetime, str, str | None]]]] = {}
+    parsed_records: list[tuple[Path, tuple[str, int] | None, bool]] = []
 
     for index, record in enumerate(records):
         source_path = Path(str(record.get("SourceFile") or ""))
         seq = _parse_sequence_name(source_path)
-        parsed_records.append((record, source_path, seq))
-        if seq is None:
-            continue
         embedded = _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz, camera_tz)
+        parsed_records.append((source_path, seq, embedded is not None))
         if embedded is None:
+            continue
+        stem_key = (str(source_path.parent), source_path.stem.casefold())
+        anchors_by_stem.setdefault(stem_key, []).append((source_path.suffix.casefold(), embedded))
+        if seq is None:
             continue
         prefix, number = seq
         group = (str(source_path.parent), prefix, source_path.suffix.casefold())
         anchors_by_group.setdefault(group, []).append((number, index, embedded))
 
     overrides: dict[str, tuple[datetime, str, str | None]] = {}
-    for index, (record, source_path, seq) in enumerate(parsed_records):
-        if seq is None:
-            continue
+    for index, (source_path, seq, has_embedded) in enumerate(parsed_records):
         source_key = str(source_path)
-        if source_key in overrides:
-            continue
-        if _resolve_embedded_capture_datetime(record, timezone_lookup, recording_tz, camera_tz) is not None:
+        if has_embedded or source_key in overrides:
             continue
 
+        same_stem = anchors_by_stem.get((str(source_path.parent), source_path.stem.casefold()))
+        if same_stem:
+            # Deterministic pick when several siblings qualify (e.g. .MP4 and .WAV).
+            anchor_dt, anchor_source, anchor_tz = min(same_stem, key=lambda item: item[0])[1]
+            overrides[source_key] = (anchor_dt, f"same-stem-{anchor_source}", anchor_tz)
+            continue
+
+        if seq is None:
+            continue
         prefix, number = seq
         group = (str(source_path.parent), prefix, source_path.suffix.casefold())
         anchors = anchors_by_group.get(group, [])

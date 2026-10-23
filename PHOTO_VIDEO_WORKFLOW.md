@@ -81,8 +81,8 @@ python3 scripts/organize_media_by_local_date.py "<source_root>" "<destination_ro
   1. EXIF/media capture datetime, corrected to local time using GPS coordinates (offline
      `timezonefinder` + `zoneinfo` — no network calls) when GPS is present.
   2. If EXIF has a UTC offset but no GPS, converts using `--recording-timezone`.
-  3. Falls back to an adjacent sibling file's embedded capture time (same folder, same shooting
-     sequence).
+  3. Falls back to a sibling file's embedded capture time: first one with the same name (e.g. a
+     GoPro `.THM` takes its `.MP4`'s time), else an adjacent file in the same shooting sequence.
   4. Falls back to file creation time, then file mtime — treated as recording-local wall time when
      `--recording-timezone` is given.
 - `--recording-timezone` is **required** if any file in the source lacks GPS (the script pre-scans
