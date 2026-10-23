@@ -26,6 +26,18 @@ EXIF_CAPTURE_FIELDS = [
     ("TrackCreateDate", None),
 ]
 
+TIMEZONEFINDER_INSTALL_HINT = (
+    "Install it in a venv, then run this script with the venv's python:\n"
+    "  python3 -m venv ~/.venvs/organize-media\n"
+    "  ~/.venvs/organize-media/bin/pip install timezonefinder\n"
+    "  ~/.venvs/organize-media/bin/python organize_media_by_local_date.py ..."
+)
+EXIFTOOL_INSTALL_HINT = (
+    "Install it, then re-run:\n"
+    "  sudo apt install libimage-exiftool-perl    # Debian/Ubuntu\n"
+    "  brew install exiftool                      # macOS"
+)
+
 MAC_METADATA_DIRS = {
     ".Spotlight-V100",
     ".fseventsd",
@@ -428,8 +440,8 @@ def _create_timezone_lookup(cache_precision: int = 3) -> Callable[[float, float]
         from timezonefinder import TimezoneFinder
     except ImportError as exc:
         raise RuntimeError(
-            "timezonefinder is required for offline timezone polygon lookup. "
-            "Install it before running this script."
+            f"timezonefinder is not installed for this Python ({sys.executable}).\n"
+            f"{TIMEZONEFINDER_INSTALL_HINT}"
         ) from exc
 
     finder = TimezoneFinder(in_memory=True)
@@ -498,7 +510,7 @@ def _extract_metadata_records(source_root: Path) -> list[dict[str, Any]]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError as exc:
-        raise RuntimeError("exiftool is required but not installed") from exc
+        raise RuntimeError(f"exiftool is not installed.\n{EXIFTOOL_INSTALL_HINT}") from exc
     # exit code 1 = minor errors (e.g. non-image files present); stdout still contains valid JSON
     if result.returncode not in (0, 1):
         raise RuntimeError(f"exiftool failed (exit {result.returncode}): {result.stderr.strip()}")

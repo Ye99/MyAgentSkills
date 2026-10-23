@@ -695,5 +695,34 @@ def test_same_stem_pick_is_deterministic():
     assert _overrides(list(reversed(records)))["/mnt/d/C1.THM"][0] == datetime(2025, 6, 1, 10, 0, 0)
 
 
+
+# --- missing-dependency errors include install commands ---
+
+def test_missing_timezonefinder_error_gives_venv_install_commands(monkeypatch):
+    monkeypatch.setitem(sys.modules, "timezonefinder", None)  # makes the import fail
+
+    with pytest.raises(RuntimeError) as excinfo:
+        mod._create_timezone_lookup()
+
+    message = str(excinfo.value)
+    assert sys.executable in message
+    assert "python3 -m venv ~/.venvs/organize-media" in message
+    assert "~/.venvs/organize-media/bin/pip install timezonefinder" in message
+
+
+def test_missing_exiftool_error_gives_install_commands(monkeypatch, tmp_path):
+    def no_exiftool(*_args, **_kwargs):
+        raise FileNotFoundError("exiftool")
+
+    monkeypatch.setattr(mod.subprocess, "run", no_exiftool)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        mod._extract_metadata_records(tmp_path)
+
+    message = str(excinfo.value)
+    assert "sudo apt install libimage-exiftool-perl" in message
+    assert "brew install exiftool" in message
+
+
 if __name__ == "__main__":
     unittest.main()

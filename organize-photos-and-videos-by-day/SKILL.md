@@ -56,17 +56,32 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 - Python `zoneinfo` (IANA timezone rules)
 - Optional but recommended for unknown-signature triage: `ffprobe` (from `ffmpeg`)
 
-Install (Debian/Ubuntu; on macOS use `brew install exiftool ffmpeg`):
+## Setup Check (Run First)
+
+Before the first dry run on a machine, check both required dependencies:
 
 ```bash
-sudo apt install libimage-exiftool-perl ffmpeg
-python3 -m venv ~/.venvs/organize-media
-~/.venvs/organize-media/bin/pip install timezonefinder
+exiftool -ver
+~/.venvs/organize-media/bin/python -c "import timezonefinder; print('timezonefinder ok')"
 ```
 
-Then run the script with `~/.venvs/organize-media/bin/python` instead of `python3`. A venv avoids the "externally managed environment" error from system Python. `timezonefinder` pulls in a ~33 MB data package, so allow for a slow download.
+- **`exiftool -ver` fails** → install it. This needs `sudo`; if `sudo` is blocked inside an agent sandbox (e.g. "no new privileges"), ask the user to run it in their own terminal, then re-run `exiftool -ver`.
 
-If `sudo` fails inside an agent sandbox (e.g. "no new privileges"), ask the user to run the `apt` line in their own terminal, then confirm with `exiftool -ver`.
+  ```bash
+  sudo apt install libimage-exiftool-perl ffmpeg    # Debian/Ubuntu
+  brew install exiftool ffmpeg                      # macOS
+  ```
+
+- **The venv check fails** (no such file, or `ModuleNotFoundError`) → create the venv and install `timezonefinder`. No `sudo` needed; the agent can do this itself. It downloads a ~33 MB data package, so do not use a short timeout.
+
+  ```bash
+  python3 -m venv ~/.venvs/organize-media
+  ~/.venvs/organize-media/bin/pip install timezonefinder
+  ```
+
+  If `python3 -m venv` reports `ensurepip is not available`, ask the user to run `sudo apt install python3-venv` first.
+
+Always run the script with `~/.venvs/organize-media/bin/python`, not `python3`. System Python on recent Debian/Ubuntu refuses `pip install` ("externally managed environment"), and it will not see the venv's `timezonefinder`.
 
 ## Before Running: Confirm Time Zones With the User
 
@@ -93,7 +108,7 @@ The script cannot detect a camera clock set to the wrong zone; files store only 
 Dry-run report:
 
 ```bash
-python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
+~/.venvs/organize-media/bin/python scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
     --recording-timezone Asia/Shanghai \
     --report organize_media_report.json
 ```
@@ -101,7 +116,7 @@ python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to
 Apply copy:
 
 ```bash
-python3 scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
+~/.venvs/organize-media/bin/python scripts/organize_media_by_local_date.py "/path/to/source_root" "/path/to/destination_root" \
     --recording-timezone Asia/Shanghai \
     --apply --report organize_media_report.json
 ```

@@ -66,11 +66,11 @@ Output of this step becomes the `source_root` for step 2.
 [`find-missing-files`](find-missing-files/SKILL.md))
 
 ```bash
-python3 scripts/organize_media_by_local_date.py "<source_root>" "<destination_root>" \
+~/.venvs/organize-media/bin/python scripts/organize_media_by_local_date.py "<source_root>" "<destination_root>" \
     --recording-timezone Asia/Shanghai \
     --report organize_media_report.json
 # review report, then:
-python3 scripts/organize_media_by_local_date.py "<source_root>" "<destination_root>" \
+~/.venvs/organize-media/bin/python scripts/organize_media_by_local_date.py "<source_root>" "<destination_root>" \
     --recording-timezone Asia/Shanghai \
     --apply --report organize_media_report.json
 ```
