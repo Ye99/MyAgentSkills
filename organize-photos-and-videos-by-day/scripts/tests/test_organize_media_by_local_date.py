@@ -540,6 +540,28 @@ def test_camera_tz_corrects_naive_photo_without_gps():
     assert source == "DateTimeOriginal-camera-tz-recording-tz-converted"
 
 
+def test_camera_tz_corrects_quicktime_value_then_uses_gps_location_zone():
+    # Video with GPS coordinates but no GPS time; camera clock on Pacific time.
+    # Raw clock 03:00 PDT = 10:00 UTC = 19:00 in Tokyo (the GPS location),
+    # which must win over --recording-timezone (Shanghai would give 18:00).
+    record = {
+        "CreateDate": "2025:06:01 03:00:00+00:00",
+        "GPSLatitude": 35.6586,
+        "GPSLongitude": 139.7454,
+    }
+    lookups = []
+
+    def lookup(lat, lon):
+        lookups.append((lat, lon))
+        return "Asia/Tokyo"
+
+    resolved, source, tz_name = _resolve(record, camera_tz=SEATTLE, timezone_lookup=lookup)
+    assert resolved == datetime(2025, 6, 1, 19, 0, 0)
+    assert source == "CreateDate-camera-tz-offset-converted"
+    assert tz_name == "Asia/Tokyo"
+    assert lookups == [(35.6586, 139.7454)]
+
+
 def test_camera_tz_does_not_override_gps_utc_time():
     record = {
         "DateTimeOriginal": "2025:12:30 19:07:06",
