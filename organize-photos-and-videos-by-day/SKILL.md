@@ -56,6 +56,26 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 - Python `zoneinfo` (IANA timezone rules)
 - Optional but recommended for unknown-signature triage: `ffprobe` (from `ffmpeg`)
 
+## Before Running: Confirm Time Zones With the User
+
+The script cannot detect a camera clock set to the wrong zone; files store only a wall-clock reading. Before the first dry run, settle both zones with the user:
+
+1. **Show sample raw clock times.** These are the camera's clock readings, with no zone applied:
+
+   ```bash
+   exiftool -api QuickTimeUTC=0 -r -q -q -n -T -FileName -DateTimeOriginal -CreateDate -GPSLatitude "/path/to/source_root" \
+       | awk -F'\t' '$2!="-" || $3!="-"' | sort | sed -n '1,5p;$p'
+   ```
+
+   Columns: file, photo time, video time, GPS latitude (`-` = no GPS). Pick a few files spread across the set (first, last, one per day).
+2. **Ask where the media was filmed.** Map the answer to an IANA name (`Asia/Shanghai`, not `CST`; `America/Los_Angeles`, not `PDT`) → `--recording-timezone`. One zone per run: if the trip crossed zones, split the source by leg and run once per leg.
+3. **Ask whether the camera clock was set to that zone.** Show the sample times and ask whether they match when the user remembers filming (e.g. "GX010005 reads 03:00 on June 1 — were you filming around then?").
+   - Yes → omit `--camera-timezone`.
+   - No (e.g. left on home time) → ask which zone the clock was on → `--camera-timezone <IANA>`.
+   - Unsure → convert a sample time both ways and let the user pick the one that matches their memory.
+4. **Skip what GPS already answers.** If every file has GPS, `--recording-timezone` is optional, and files with GPS time ignore the camera clock. Still ask about the clock if any file lacks GPS.
+5. **Check the dry-run report** before `--apply`: `timestamp_source` contains `camera-tz` for corrected files.
+
 ## Usage
 
 Dry-run report:
