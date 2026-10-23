@@ -56,6 +56,18 @@ Organize a source folder tree into `destination/%Y/%Y_%m_%d` using capture time 
 - Python `zoneinfo` (IANA timezone rules)
 - Optional but recommended for unknown-signature triage: `ffprobe` (from `ffmpeg`)
 
+Install (Debian/Ubuntu; on macOS use `brew install exiftool ffmpeg`):
+
+```bash
+sudo apt install libimage-exiftool-perl ffmpeg
+python3 -m venv ~/.venvs/organize-media
+~/.venvs/organize-media/bin/pip install timezonefinder
+```
+
+Then run the script with `~/.venvs/organize-media/bin/python` instead of `python3`. A venv avoids the "externally managed environment" error from system Python. `timezonefinder` pulls in a ~33 MB data package, so allow for a slow download.
+
+If `sudo` fails inside an agent sandbox (e.g. "no new privileges"), ask the user to run the `apt` line in their own terminal, then confirm with `exiftool -ver`.
+
 ## Before Running: Confirm Time Zones With the User
 
 The script cannot detect a camera clock set to the wrong zone; files store only a wall-clock reading. Before the first dry run, settle both zones with the user:
