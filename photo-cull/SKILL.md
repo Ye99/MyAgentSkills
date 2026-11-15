@@ -130,7 +130,8 @@ private all the same.
 
 ## What `apply` guarantees
 
-- Copies only; the source is read-only to this tool. It exits if the source changed since `scan`.
+- Copies only; the source is read-only to this tool. It exits if files were added to or removed
+  from the source since the scan, and if `OUT` is the source folder or inside it.
 - Every file in the source is accounted for: kept, or left behind with a reason.
 - A Live Photo's video and every Takeout JSON sidecar follow their photo. Other videos, unreadable
   images and unrecognised files are always kept.
@@ -151,6 +152,7 @@ private all the same.
 |---|---|
 | `operations.jsonl` | Audit trail, one JSON object per line, appended by every stage: `stage`, `event`, `ts` plus fields. `analyze`/`decision` has one line per image with `keep`, `reason`, `sharpness`, `rotate`, `rotate_by` (`scene` or `text`), `rotate_conf` (scene check), `text_scores`, `group`, `kept_instead`, and for burst frames with people `faces`, `smile`, `eyes_closed` (known people only); `accident` (probability that the shot was accidental) and `receipt`; a frame with `reason` `facial` also has `why` (`eyes closed` or `bad facial expression`) and `kept_instead` (the best frame of its burst). `apply` has one `kept` (with `verified`, `rotate`) or `left_behind` (with `reason`) line per source file, plus one `override` line per manual change. `scan` and `analyze` each end with a `timing` line: wall-clock seconds per step (steps of `analyze` overlap, so they add up to more than its `total`). The same review is also saved as feedback across folders, see "Learning from the review". |
 | `scan.json` | Per-file metadata and measurements. |
+| `thumbs/`, `embeddings.npz` | 640-pixel previews of every image, and the cached scene-model features. |
 | `plan.json` | Proposed decision per image and the thresholds used. |
 | `review.html` | The review page (needs the `thumbs/` and `full/` folders beside it). |
 | `text_scores.json` | Cache of the text check: per photo, how much text read cleanly after 0-3 clockwise quarter turns, or null when the photo shows almost no text. |
@@ -249,6 +251,8 @@ decisions before and after.
 
 - One flat folder per run; subfolders are ignored. `WORK` must be outside `SRC`, and a scan
   empties `WORK/thumbs` and `WORK/full` (it refuses a folder that has those but is not its own).
+- One `WORK` per photo folder. Everything measured is cached there by file name, and names such
+  as `IMG_0001` repeat from year to year, so a scan refuses a `WORK` that holds another folder's scan.
 - Blur detection is the weakest part. The sharpness measure cannot tell a blurred photo from a
   sharp photo of a scene with little detail (fireworks over dark water, open sky, underwater), so
   expect such scenes among the blurry picks and tell the user to check that section with care.

@@ -1507,3 +1507,62 @@ def test_excluded_photos_are_marked_by_colour_not_dimmed():
     css = pc.REVIEW_HTML.split("</style>")[0]
     assert "opacity" not in css and "filter" not in css  # the user still has to judge the photo
     assert ".c.rej{border-color:#c33}" in css and ".c.rej .x{" in css  # red border and a red button instead
+
+
+# ------------------------------------------------------------ line-by-line review findings
+
+def test_apply_refuses_to_copy_into_the_photo_folder(tmp_path):
+    # Copying a photo onto itself is a no-op, but rotating that "copy" would rewrite the original.
+    src, work, _, ov = _scanned(tmp_path)
+    before = _hashes(src)
+    for out in (src, src / "keepers"):
+        with pytest.raises(SystemExit):
+            pc.main(["apply", str(src), str(work), str(out), "--overrides", str(ov), "--apply"])
+    assert _hashes(src) == before
+
+
+def test_scan_refuses_a_work_folder_that_belongs_to_another_photo_folder(tmp_path):
+    # Everything measured is cached by file name, and IMG_0001 exists in every year's folder.
+    src, work = _folder(tmp_path), tmp_path / "work"
+    pc.main(["scan", str(src), str(work), "--jobs", "2", "--no-faces"])
+    other = tmp_path / "other"
+    other.mkdir()
+    _photo(other / "sharp.jpg", seed=9)
+    with pytest.raises(SystemExit):
+        pc.main(["scan", str(other), str(work), "--jobs", "2", "--no-faces"])
+    assert json.loads((work / "scan.json").read_text())["src"] == str(src)  # the first scan is untouched
+    pc.main(["scan", str(src), str(work), "--jobs", "2", "--no-faces"])    # the same folder again is fine
+
+
+def test_a_folder_with_nothing_to_judge_still_gets_a_plan(tmp_path):
+    pytest.importorskip("torch")
+    from PIL import Image
+    src = tmp_path / "src"
+    src.mkdir()
+    Image.new("RGB", (100, 200), "white").save(src / "shot.png")
+    _exiftool(src / "shot.png", "-UserComment=Screenshot")
+    (src / "notes.txt").write_text("not media")
+    pc.main(["run", str(src), str(tmp_path / "work"), "--jobs", "2"])
+    plan = json.loads((tmp_path / "work" / "plan.json").read_text())["plan"]
+    assert plan["shot.png"]["reason"] == "screenshot" and len(plan) == 1
+
+
+def test_a_failing_face_reader_does_not_make_the_photo_unreadable(tmp_path, monkeypatch):
+    _photo(tmp_path / "a.jpg")
+
+    def broken(rgb):
+        raise RuntimeError("face model failed")
+    monkeypatch.setattr(pc, "_faces_of", broken)
+    res = pc._scan_image((str(tmp_path / "a.jpg"), str(tmp_path / "t.jpg"), True))
+    assert "error" not in res and res["sharp_p90"] > 0 and "faces" not in res
+
+
+def test_a_full_size_preview_cut_short_is_not_left_looking_finished(tmp_path, monkeypatch):
+    _photo(tmp_path / "a.jpg")
+
+    def interrupted(a, b):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pc.os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        pc._full_preview((str(tmp_path / "a.jpg"), str(tmp_path / "full.jpg")))
+    assert not (tmp_path / "full.jpg").exists()

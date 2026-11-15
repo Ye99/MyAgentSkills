@@ -300,8 +300,7 @@ def build_plan(items, rot_probs, bursts, blur_below, rot_conf, text=None, faces=
 
     `rot_probs` maps item index -> [p0..p3] from the scene model; `text` maps
     item index -> text scores (see text_verdict); `bursts` is a list of
-    item-index groups. Precedence: screenshot, then blurry, then facial
-    duplicate. `rotate` is the number of clockwise quarter turns to apply.
+    item-index groups. Precedence: screenshot, then blurry, then facial. `rotate` is the number of clockwise quarter turns to apply.
 
     Readable text outranks the scene model: it can cancel a proposed turn, and
     it can propose one unless the scene model is sure the photo is upright
@@ -708,7 +707,10 @@ def _scan_image(job):
         os.replace(thumb + ".part", thumb)  # the analysis may be waiting for it: never show it half-written
         res = {"sharp_p90": round(p90, 2), "sharp_med": round(med, 2)}
         if want_faces:
-            res["faces"] = _faces_of(rgb)
+            try:
+                res["faces"] = _faces_of(rgb)
+            except Exception:  # the analysis measures the faces it needs itself, and reports what goes wrong
+                pass
         return res
     except Exception as e:  # unreadable image: keep it, never judge it
         return {"error": f"{type(e).__name__}: {e}"}
@@ -732,7 +734,7 @@ def scan_list(src, work, clock, jobs=None):
     names = sorted(f for f in os.listdir(src) if (src / f).is_file())
     jsons = [f for f in names if f.lower().endswith(".json")]
     media = [f for f in names if not f.lower().endswith(".json")]
-    log_event(work, "scan", "start", src=str(src), files=len(media), json_sidecars=len(jsons))
+    log_event(work, "scan", "start", src=str(src.resolve()), files=len(media), json_sidecars=len(jsons))
     print(f"[scan] {len(media)} files + {len(jsons)} json sidecars", file=sys.stderr)
 
     with clock.step("metadata"):
@@ -823,6 +825,12 @@ def scan_start(src, work):
     if src.resolve() == work.resolve() or src.resolve() in work.resolve().parents:
         sys.exit(f"WORK ({work}) must be outside the photo folder: the source is never written to.")
     mine = (work / LOG_NAME).exists()
+    if mine:  # everything measured is cached in WORK by file name, and names repeat from folder to folder
+        for line in (work / LOG_NAME).read_text().splitlines():
+            if '"event": "start"' in line and '"stage": "scan"' in line:
+                earlier = json.loads(line).get("src")
+                if earlier and Path(earlier).resolve() != src.resolve():
+                    sys.exit(f"{work} holds the scan of another folder ({earlier}). Use a new WORK for {src}.")
     if not mine and any((work / d).exists() for d in ("full", "thumbs")):
         sys.exit(f"{work} has a thumbs or full folder but no {LOG_NAME}: it is not a work folder of this tool, "
                  "and scanning would empty those folders. Choose another WORK.")
@@ -1103,7 +1111,8 @@ def _full_preview(job):
     src, dst = job
     try:
         from PIL import Image
-        Image.fromarray(pixels(src)).save(dst, "JPEG", quality=90)
+        Image.fromarray(pixels(src)).save(dst + ".part", "JPEG", quality=90)
+        os.replace(dst + ".part", dst)  # existing previews are trusted, so never leave half of one
         return True
     except Exception:
         return False
@@ -1216,6 +1225,8 @@ def cmd_apply(args):
     if args.apply and not args.overrides:
         sys.exit("refusing to copy: pass --overrides with the overrides.json downloaded from "
                  "review.html, so the review happens before anything is copied")
+    if src.resolve() == out.resolve() or src.resolve() in out.resolve().parents:
+        sys.exit(f"OUT ({out}) must be outside the photo folder: the source is never written to.")
     scan = json.loads((work / "scan.json").read_text())
     saved = json.loads((work / "plan.json").read_text())
     plan = saved["plan"]
@@ -1462,10 +1473,7 @@ def _text_scores_on(reader, paths):
 
 def _text_models(languages):
     """Download the OCR models once, before several processes ask for them at the same time."""
-    try:
-        import easyocr
-    except ImportError:
-        raise
+    import easyocr
     folder = Path.home() / ".EasyOCR" / "model"
     if ISOLATE_DEVICES and not (folder.is_dir() and any(folder.iterdir())):
         easyocr.Reader(languages, gpu=False, verbose=False)
@@ -1495,7 +1503,6 @@ def text_scores(work, items, languages, devices=None, per_gpu=TEXT_WORKERS_PER_G
     Returns {name: scores or None} (see _text_scores_on). Results are cached in
     WORK/text_scores.json; only photos not yet in the cache are read.
     """
-    import numpy as np
     work = Path(work)
     cache = work / "text_scores.json"
     known = {}
@@ -1716,7 +1723,6 @@ def composition_scores(work, items, rotations, model_name=COMPOSITION_MODEL, dev
     are judged as stored, which is how nearly all of them will stay. A later
     call with the real rotations then only has the turned ones left to ask.
     """
-    import numpy as np
     work = Path(work)
     cache = work / "composition.json"
     saved = json.loads(cache.read_text()) if cache.exists() else {}
@@ -1849,70 +1855,83 @@ def analyze(work, scan, args, scanning=None):
             return cached["feats"], cached["regions"], False
         return *embed(work, [items[i] for i in cand], args.model, args.batch), True
 
-    with ThreadPoolExecutor(3) as side:
-        first_look = side.submit(timed, "composition", composition_scores, work, [items[i] for i in cand], None,
-                                 args.composition_model) if judging else None
-        reading = side.submit(timed, "text", text_scores, work, [items[i] for i in cand], args.text_languages.split(","),
-                              None, TEXT_WORKERS_SHARING if judging else TEXT_WORKERS_PER_GPU) \
-            if args.text_direction else None
-        feats, regions, fresh = timed("embed", embeddings)
-        text = {}
-        if reading:
-            try:
-                by_name = reading.result()
-                text = {i: by_name[items[i]["name"]] for i in cand}
-            except ImportError:
-                print("[analyze] easyocr is not installed: text direction is not checked", file=sys.stderr)
-                log_event(work, "analyze", "text_direction_skipped", why="easyocr is not installed")
-        if scanning:
-            scanning.result()  # every image has been opened: sharpness, faces and unreadable photos are known
-            ok = [k for k, i in enumerate(cand) if not items[i].get("error")]
-            cand, names, feats, regions = [cand[k] for k in ok], [names[k] for k in ok], feats[ok], regions[ok]
-        if fresh:
-            np.savez(work / "embeddings.npz", feats=feats, regions=regions, names=np.array(names), model=args.model)
+    nothing = lambda: build_plan(items, {}, [], args.blur_below, args.rotate_confidence)
 
-        times = np.array([items[i]["t"] if items[i]["t"] is not None else 0.0 for i in cand])
-        order = np.argsort(times, kind="stable")
-        with clock.step("scene rotation"):
-            probs = predict_rotation(feats, order)
-        rot_probs = {cand[k]: probs[k].tolist() for k in range(len(cand))}
+    def decide():
+        nonlocal cand, names
+        if not cand:  # only screenshots, videos or unreadable files: no model has anything to look at
+            if scanning:
+                scanning.result()
+            return nothing()
+        with ThreadPoolExecutor(3) as side:
+            first_look = side.submit(timed, "composition", composition_scores, work, [items[i] for i in cand], None,
+                                     args.composition_model) if judging else None
+            reading = side.submit(timed, "text", text_scores, work, [items[i] for i in cand], args.text_languages.split(","),
+                                  None, TEXT_WORKERS_SHARING if judging else TEXT_WORKERS_PER_GPU) \
+                if args.text_direction else None
+            feats, regions, fresh = timed("embed", embeddings)
+            text = {}
+            if reading:
+                try:
+                    by_name = reading.result()
+                    text = {i: by_name[items[i]["name"]] for i in cand}
+                except ImportError:
+                    print("[analyze] easyocr is not installed: text direction is not checked", file=sys.stderr)
+                    log_event(work, "analyze", "text_direction_skipped", why="easyocr is not installed")
+            if scanning:
+                scanning.result()  # every image has been opened: sharpness, faces and unreadable photos are known
+                ok = [k for k, i in enumerate(cand) if not items[i].get("error")]
+                cand, names, feats, regions = [cand[k] for k in ok], [names[k] for k in ok], feats[ok], regions[ok]
+                if not cand:
+                    return nothing()
+            if fresh:
+                np.savez(work / "embeddings.npz", feats=feats, regions=regions, names=np.array(names), model=args.model)
 
-        timed_shots = [k for k in order if items[cand[k]]["t"] is not None]
-        with clock.step("bursts"):
-            groups = group_bursts(times[timed_shots], regions[timed_shots].astype(np.float32),
-                                  args.burst_seconds, args.burst_similarity)
-        bursts = [[cand[timed_shots[j]] for j in g] for g in groups]
+            times = np.array([items[i]["t"] if items[i]["t"] is not None else 0.0 for i in cand])
+            order = np.argsort(times, kind="stable")
+            with clock.step("scene rotation"):
+                probs = predict_rotation(feats, order)
+            rot_probs = {cand[k]: probs[k].tolist() for k in range(len(cand))}
 
-        faces = {}
-        if args.faces and bursts:
-            try:
-                import mediapipe  # noqa: F401
-                members = [items[i]["name"] for g in bursts for i in g]
-                with clock.step("faces"):  # read at full resolution, straight from the source photos
-                    by_name = face_scores(work, {n: str(Path(scan["src"]) / n) for n in members}, args.jobs)
-                faces = {i: by_name[items[i]["name"]] for g in bursts for i in g}
-                day = lambda g: int((items[g[0]]["t"] or 0) // 86400)
-                people = mark_familiar([[faces[i] for i in g] for g in bursts], [day(g) for g in bursts])
-                print(f"[analyze] {people} people appear on {FAMILIAR_DAYS} or more days; "
-                      + ("only their faces are judged" if people
-                         else "too few to tell strangers apart, so every face is judged"), file=sys.stderr)
-                log_event(work, "analyze", "familiar_people", people=people, min_days=FAMILIAR_DAYS)
-            except ImportError:
-                print("[analyze] mediapipe is not installed: faces are not checked", file=sys.stderr)
-                log_event(work, "analyze", "faces_skipped", why="mediapipe is not installed")
+            timed_shots = [k for k in order if items[cand[k]]["t"] is not None]
+            with clock.step("bursts"):
+                groups = group_bursts(times[timed_shots], regions[timed_shots].astype(np.float32),
+                                      args.burst_seconds, args.burst_similarity)
+            bursts = [[cand[timed_shots[j]] for j in g] for g in groups]
 
-        plan = build_plan(items, rot_probs, bursts, args.blur_below, args.rotate_confidence, text, faces)
-        if judging:
-            try:
-                first_look.result()
-                with clock.step("composition, turned photos"):
-                    scored = composition_scores(work, [items[i] for i in cand],
-                                                {n: p["rotate"] for n, p in plan.items()}, args.composition_model)
-                apply_composition(plan, scored, args.accident_confidence if args.composition else None,
-                                  args.receipt_confidence if args.receipts else None)
-            except ImportError as e:
-                print(f"[analyze] accidental shots and receipts are not checked: {e}", file=sys.stderr)
-                log_event(work, "analyze", "composition_skipped", why=str(e))
+            faces = {}
+            if args.faces and bursts:
+                try:
+                    import mediapipe  # noqa: F401
+                    members = [items[i]["name"] for g in bursts for i in g]
+                    with clock.step("faces"):  # read at full resolution, straight from the source photos
+                        by_name = face_scores(work, {n: str(Path(scan["src"]) / n) for n in members}, args.jobs)
+                    faces = {i: by_name[items[i]["name"]] for g in bursts for i in g}
+                    day = lambda g: int((items[g[0]]["t"] or 0) // 86400)
+                    people = mark_familiar([[faces[i] for i in g] for g in bursts], [day(g) for g in bursts])
+                    print(f"[analyze] {people} people appear on {FAMILIAR_DAYS} or more days; "
+                          + ("only their faces are judged" if people
+                             else "too few to tell strangers apart, so every face is judged"), file=sys.stderr)
+                    log_event(work, "analyze", "familiar_people", people=people, min_days=FAMILIAR_DAYS)
+                except ImportError:
+                    print("[analyze] mediapipe is not installed: faces are not checked", file=sys.stderr)
+                    log_event(work, "analyze", "faces_skipped", why="mediapipe is not installed")
+
+            plan = build_plan(items, rot_probs, bursts, args.blur_below, args.rotate_confidence, text, faces)
+            if judging:
+                try:
+                    first_look.result()
+                    with clock.step("composition, turned photos"):
+                        scored = composition_scores(work, [items[i] for i in cand],
+                                                    {n: p["rotate"] for n, p in plan.items()}, args.composition_model)
+                    apply_composition(plan, scored, args.accident_confidence if args.composition else None,
+                                      args.receipt_confidence if args.receipts else None)
+                except ImportError as e:
+                    print(f"[analyze] accidental shots and receipts are not checked: {e}", file=sys.stderr)
+                    log_event(work, "analyze", "composition_skipped", why=str(e))
+        return plan
+
+    plan = decide()
     params = {k: v for k, v in vars(args).items() if k not in ("func", "work", "cmd", "src")}
     full = {}
     if args.full_previews:
