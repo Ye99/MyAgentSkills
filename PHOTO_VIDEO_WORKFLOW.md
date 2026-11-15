@@ -16,6 +16,9 @@ run in and why.
 (1) dedup-copy                 [optional — only when consolidating multiple overlapping sources]
         |
         v
+(1b) photo-cull                [optional — drop screenshots, blurry and accidental shots, receipts, burst frames with bad faces; fix rotation]
+        |
+        v
 (2) organize-photos-and-videos-by-day   <-- core step
         |  (uses photo-gps-from-exif + find-missing-files internally)
         v
@@ -56,6 +59,27 @@ that likely overlap. Skip it if the source is already a single, non-redundant tr
 3. `verify_dedup_copy.py` independently re-checks the copy: arithmetic reconciliation, every
    source file accounted for, every keeper present, SHA-256 spot-checks, and no unexpected extras
    in the target.
+
+Output of this step becomes the `source_root` for step 2.
+
+## Step 1b — Cull before archiving (optional)
+
+**Skill:** [`photo-cull`](photo-cull/SKILL.md)
+
+Use this on a folder of phone photos (for example a Google Takeout `Photos from YYYY` export) so
+that only photos worth keeping get organized and named.
+
+1. `photo_cull.py run` reads metadata, makes thumbnails, measures sharpness and faces, and
+   proposes what to leave behind (screenshots, blurry shots, accidental shots, receipts, burst
+   frames with closed eyes or a bad expression) and which sideways or upside-down photos to turn
+   upright.
+2. It writes a `review.html` page.
+3. **The user reviews that page** and downloads `overrides.json` from it.
+4. `photo_cull.py apply` copies the keepers to a new folder, rotating copies by changing only
+   their orientation flag, and verifies every copy.
+
+Like every other step it copies and never deletes: rejected photos stay behind in the source.
+Every decision and operation is appended to `operations.jsonl` in its work folder.
 
 Output of this step becomes the `source_root` for step 2.
 
