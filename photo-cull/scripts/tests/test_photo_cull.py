@@ -199,20 +199,22 @@ def test_overrides_can_rescue_a_reject_and_reject_a_keeper():
 
 import hashlib
 import json
+import shutil
 import subprocess
 
 
 def _exiftool(path, *tags):
+    if shutil.which("exiftool") is None:
+        pytest.skip("exiftool not installed")
     subprocess.run(["exiftool", "-q", "-q", "-n", "-overwrite_original", *tags, str(path)], check=True)
 
 
 def _photo(path, seed=0, blur=0, orientation=None, when="2026:01:01 10:00:00", corner=False):
     np = pytest.importorskip("numpy")
-    cv2 = pytest.importorskip("cv2")
-    from PIL import Image
+    from PIL import Image, ImageFilter
     a = (np.random.default_rng(seed).random((240, 320, 3)) * 255).astype(np.uint8)
-    if blur:
-        a = cv2.GaussianBlur(a, (0, 0), blur)
+    if blur:  # PIL, not cv2: making a test photo should not need OpenCV
+        a = np.asarray(Image.fromarray(a).filter(ImageFilter.GaussianBlur(blur)))
     if corner:
         a[:, :, 1] |= 0xE0  # textured but always strongly green ...
         a[:80, :80] = (255, 0, 0)  # ... except a red block in the top-left corner
@@ -599,6 +601,7 @@ def test_text_scores_already_read_are_saved_when_one_device_fails(tmp_path, monk
             raise RuntimeError("device fell over")
         return [[9, 0, 0, 0] for _ in paths]
     monkeypatch.setattr(pc, "_text_on", fake)
+    monkeypatch.setattr(pc, "_text_models", lambda languages: None)  # no OCR library needed
     monkeypatch.setattr(pc, "ISOLATE_DEVICES", False)  # the fake cannot cross a process boundary
     items = [{"name": n, "thumb": f"thumbs/{n}.png"} for n in "abcd"]
     with pytest.raises(RuntimeError):
@@ -1425,6 +1428,7 @@ def test_scan_refuses_a_work_folder_that_holds_someone_elses_thumbs(tmp_path):
 
 # ------------------------------------------------------------ speed changes must not change results
 
+@pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_metadata_read_by_several_exiftool_processes_is_the_same_as_by_one(tmp_path):
     from PIL import Image
     names = [f"p {k:02d} é.jpg" for k in range(45)]  # enough files for more than one process; awkward names
