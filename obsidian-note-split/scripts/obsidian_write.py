@@ -10,6 +10,9 @@ and one command-line argument is capped near 128 KB.
 
 Order: new topic notes -> rewritten other notes -> the index (replacing the source) last,
 so an interrupted run never leaves the source replaced while topic notes are missing.
+Each file is staged in Obsidian's memory and written in one call, so no note is ever left
+half-written. Originals of every replaced note are copied to OUT_DIR/backup first, and each
+is checked again just before it is replaced, so an edit made meanwhile is never overwritten.
 
 Checks (exit 1 on failure):
   pre   every vault file the splitter read still has the sha256 recorded in report.json;
@@ -46,19 +49,25 @@ def chunks(data):
 
 
 def write_file(name, vault_path, data, mode):
+    """Stage every chunk in Obsidian's memory, then write the whole file in one call,
+    so a failed or interrupted transfer never leaves a half-written note on disk."""
     jp = json.dumps(vault_path)
+    buf = f"globalThis.__noteSplitBuf[{jp}]"
     for k, part in enumerate(chunks(data)):
         b64 = base64.b64encode(part).decode()
         dec = f"new TextDecoder().decode(Uint8Array.from(atob('{b64}'),c=>c.charCodeAt(0)))"
-        if k == 0 and mode == "create":
-            body = f"await app.vault.create({jp},{dec})"
-        elif k == 0:
-            body = f"const f=app.vault.getAbstractFileByPath({jp});await app.vault.modify(f,{dec})"
-        else:
-            body = f"const f=app.vault.getAbstractFileByPath({jp});await app.vault.append(f,{dec})"
-        res = eval_js(name, f"(async()=>{{{body};return 'ok'}})()")
+        start = "globalThis.__noteSplitBuf=globalThis.__noteSplitBuf||{};" + (f"{buf}='';" if k == 0 else "")
+        res = eval_js(name, f"(async()=>{{{start}{buf}+={dec};return 'ok'}})()")
         if res != "=> ok":
+            eval_js(name, f"(async()=>{{if(globalThis.__noteSplitBuf)delete {buf};return 'ok'}})()")
             return f"chunk {k} failed: {res[:200]}"
+    if mode == "create":
+        body = f"await app.vault.create({jp},{buf})"
+    else:
+        body = f"const f=app.vault.getAbstractFileByPath({jp});await app.vault.modify(f,{buf})"
+    res = eval_js(name, f"(async()=>{{try{{{body}}}finally{{delete {buf}}};return 'ok'}})()")
+    if res != "=> ok":
+        return f"write failed: {res[:200]}"
     return None
 
 
@@ -102,10 +111,27 @@ def main():
     if a.dry_run:
         print("dry run: nothing written"); return 0
 
+    # Keep the originals of every note about to be replaced, outside the vault.
+    backup = out / "backup"
+    for vp, _, mode in plan:
+        if mode != "modify":
+            continue
+        original = (vault / vp).read_bytes()
+        (backup / vp).parent.mkdir(parents=True, exist_ok=True)
+        (backup / vp).write_bytes(original)
+    print(f"originals backed up to {backup} (restore: copy back over the vault paths)")
+
     before = unresolved(name)
     print(f"unresolved link targets before: {len(before)}")
     for vp, lp, mode in plan:
         data = lp.read_bytes()
+        if mode == "modify":  # checked again right before: the user may be editing in Obsidian
+            now = (vault / vp).read_bytes()
+            if hashlib.sha256(now).hexdigest() != report["read_sha256"].get(vp):
+                print(f"ABORT: {vp} changed while writing; not overwritten. Notes written so far are "
+                      f"listed above; originals are in {backup}"); return 1
+        elif (vault / vp).exists():
+            print(f"ABORT: {vp} appeared while writing; not overwritten"); return 1
         e = write_file(name, vp, data, mode)
         if e:
             print(f"ABORT while writing {vp}: {e}"); return 1

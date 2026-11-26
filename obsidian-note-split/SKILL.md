@@ -78,7 +78,7 @@ Run `obsidian_write.py --dry-run` to see the write plan, then without `--dry-run
 - **F.** Obsidian's own metadata cache resolves every heading link in the written files;
 - **G.** `obsidian unresolved` gains no new link targets.
 
-If a write fails midway, the source note is still intact (the index is written last). Remove created topic notes with `obsidian vault=NAME delete path="…"` (moves them to trash) and start again from step 4.
+Each file is written in one call, so no note is ever half-written. Before replacing anything it copies the originals of the index and every rewritten note to `OUT/backup/`, and it checks each again just before replacing it, so an edit the user makes meanwhile is never overwritten. If a write fails midway, the source note is still intact (the index is written last). Remove created topic notes with `obsidian vault=NAME delete path="…"` (moves them to trash), restore any rewritten note from `OUT/backup/`, and start again from step 4.
 
 ### 6. Report and commit
 
