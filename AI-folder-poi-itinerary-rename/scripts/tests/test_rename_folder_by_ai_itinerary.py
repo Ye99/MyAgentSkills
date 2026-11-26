@@ -1208,13 +1208,16 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                     opencode_backoff_sec,
                     opencode_model,
                     inference_workers,
-                    inference_scheduler,
+                    server_pool,
                     state_file,
                     report_file,
                     resume,
                     home_gps,
                 )
-                seen_pool_ids.append(id(server_pool))
+                assert inference_scheduler is not None
+                cluster = mod.LocationCluster(points=[mod.MediaPoint("a.jpg", 1.0, 2.0, datetime(2025, 7, 22, 9, 0))])
+                inference_scheduler.submit((1.0, 2.0), cluster).result(timeout=5)
+                seen_pool_ids.append(id(inference_scheduler))
                 return {"folder_path": str(folder), "status": "planned-rename", "target_name": f"{folder.name}_A"}
 
             with patch(
@@ -1222,7 +1225,9 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 side_effect=self._fake_start_opencode_server,
             ) as start_mock:
                 with patch("rename_folder_by_ai_itinerary.stop_opencode_server", return_value=None) as stop_mock:
-                    with patch("rename_folder_by_ai_itinerary.rename_folder_from_itinerary", side_effect=fake_rename):
+                    with patch("rename_folder_by_ai_itinerary.rename_folder_from_itinerary", side_effect=fake_rename), \
+                         patch("rename_folder_by_ai_itinerary.infer_landmark_info",
+                               return_value={"landmark": "A", "country": "ISL"}):
                         summary = mod.process_folder_tree(root, apply=False, ratio=0.01, inference_workers=3)
 
         self.assertEqual(summary["total_folder_count"], 2)
