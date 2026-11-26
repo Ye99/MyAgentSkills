@@ -59,7 +59,8 @@ opencode_id="$(get_id "$opencode_user")"
 claude_id="$(get_id "$claude_user")"
 codex_id="$(get_id "$codex_user")"
 
-template_path="${repo_path%/}/.gitmessage"
+# git reads a relative commit.template from the current directory, so store an absolute path.
+template_path="$(git -C "$repo_path" rev-parse --show-toplevel)/.gitmessage"
 
 cat > "$template_path" <<EOF
 # Summary:
