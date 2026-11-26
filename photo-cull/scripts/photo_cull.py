@@ -1197,24 +1197,53 @@ def sha256(path):
     return h.hexdigest()
 
 
+PART_PREFIX = ".photo-cull-part."  # in-progress copies; no camera or phone names a file like this
+
+
+def _linked(s, d):
+    """Why an existing output file may share its data with the source or with another name, else None."""
+    if d.is_symlink():
+        return "is a symlink"
+    if d.exists() and (os.path.samefile(s, d) or d.stat().st_nlink > 1):
+        return "is a hardlink"
+    return None
+
+
 def _place(s, d, turns):
     """Copy s to d (never overwriting a different file), rotate, verify.
 
-    Returns (log fields, problem or None).
+    A rotation is always made on a fresh temporary copy that then replaces d, so
+    no existing file is edited in place: an OUT built with cp -al, ln -s or
+    rsync --link-dest can share its data with the source. Returns (log fields,
+    problem or None).
     """
     import numpy as np
+    link = _linked(s, d)
+    if link:
+        return ({"rotate": 0, "verified": "REFUSED"},
+                f"the output file {link} that may share data with the source; remove it and re-run")
     src_hash = sha256(s)
-    if not d.exists():
-        part = d.with_name(d.name + ".part")  # a copy cut short never looks like the finished file
-        shutil.copy2(s, part)
-        os.replace(part, d)
-    same = sha256(d) == src_hash
+    if d.exists():
+        same = sha256(d) == src_hash
+        if not turns:
+            return ({"rotate": 0, "verified": "sha256" if same else "MISMATCH"},
+                    None if same else "a different file with this name is already in the output")
+        if not same:  # rotated on an earlier run?
+            if np.array_equal(np.rot90(pixels(s), -turns), pixels(d)):
+                return {"rotate": turns, "verified": "pixels identical after rotation"}, None
+            return {"rotate": turns, "verified": "MISMATCH"}, "output differs from the rotated source"
+    part = d.with_name(PART_PREFIX + d.name)  # keeps the extension, which rotate_copy reads
+    shutil.copy2(s, part)
+    why = rotate_copy(part, turns) if turns else None
+    os.replace(part, d)
     if not turns:
+        same = sha256(d) == src_hash
         return ({"rotate": 0, "verified": "sha256" if same else "MISMATCH"},
-                None if same else "a different file with this name is already in the output")
-    why = rotate_copy(d, turns) if same else None  # not same: rotated on an earlier run?
+                None if same else "the copy differs from the source")
     if why:
-        return {"rotate": 0, "rotate_skipped": why, "verified": "sha256"}, f"not rotated ({why})"
+        same = sha256(d) == src_hash
+        return ({"rotate": 0, "rotate_skipped": why, "verified": "sha256" if same else "MISMATCH"},
+                f"not rotated ({why})")
     if np.array_equal(np.rot90(pixels(s), -turns), pixels(d)):
         return {"rotate": turns, "verified": "pixels identical after rotation"}, None
     return {"rotate": turns, "verified": "MISMATCH"}, "output differs from the rotated source"
@@ -1277,9 +1306,8 @@ def cmd_apply(args):
             print(f"[apply] {k}/{len(keep)} copied and verified", file=sys.stderr)
     for name, reason in left.items():
         log_event(work, "apply", "left_behind", file=name, reason=reason)
-    for stale in out.glob("*.part"):  # left by an earlier run that was interrupted
-        if stale.name[:-5] in final:
-            stale.unlink()
+    for stale in out.glob(PART_PREFIX + "*"):  # left by an earlier run that was interrupted
+        stale.unlink()
     extra = sorted(set(os.listdir(out)) - set(keep))
     if extra:
         report["problems"].append(f"unexpected files in output: {extra[:10]}")
