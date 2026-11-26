@@ -2169,6 +2169,18 @@ def _handle_inference_failure(
     }
 
 
+# Settings that change which clusters are inferred or what an answer means.
+# Timeouts, retries, backoff and worker counts only change how fast or how
+# hard the run tries, so changing them keeps finished inferences.
+_RESUME_CONFIG_KEYS = ("ratio", "cluster_distance_m", "max_landmarks", "opencode_model", "home_gps")
+
+
+def _resume_config(config: Any) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return None
+    return {key: config.get(key) for key in _RESUME_CONFIG_KEYS}
+
+
 def rename_folder_from_itinerary(
     folder: Path,
     apply: bool,
@@ -2202,6 +2214,7 @@ def rename_folder_from_itinerary(
         "opencode_initial_backoff_sec": opencode_backoff_sec,
         "opencode_model": opencode_model,
         "inference_workers": inference_workers,
+        "home_gps": [float(home_gps[0]), float(home_gps[1])],
     }
 
     try:
@@ -2279,7 +2292,7 @@ def rename_folder_from_itinerary(
     if previous_state is not None:
         if (
             previous_state.get("folder_path") == str(folder)
-            and previous_state.get("config") == current_config
+            and _resume_config(previous_state.get("config")) == _resume_config(current_config)
             and previous_state.get("input_fingerprint") == input_fingerprint
         ):
             completed_infos_by_index = load_completed_infos_by_index(previous_state)

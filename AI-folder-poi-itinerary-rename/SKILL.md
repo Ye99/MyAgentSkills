@@ -74,6 +74,8 @@ Resume from previous failed run:
 python3 scripts/rename_folder_by_ai_itinerary.py "/path/to/2025_07_24"
 ```
 
+Finished inferences are reused unless the media, `--ratio`, `--cluster-distance-m`, `--max-landmarks`, the model or `HOME_GPS` changed. Changing timeouts, retries or worker counts keeps them.
+
 Apply rename:
 
 ```bash
