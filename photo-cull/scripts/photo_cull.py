@@ -603,6 +603,14 @@ def rotate_copy(path, rotate_cw):
 
 # ---------------------------------------------------------------- log
 
+def _process_pool(max_workers, **kwargs):
+    """A process pool whose workers are spawned, never forked: `run` scans while
+    analysis threads hold GPU models, and forking a process that has threads
+    (and CUDA state) can deadlock the child."""
+    import multiprocessing
+    return ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context("spawn"), **kwargs)
+
+
 LOG_NAME = "operations.jsonl"
 
 
@@ -795,7 +803,7 @@ def scan_images(src, work, items, jsons, orphans, jobs, faces, clock):
         work_list = [(str(src / it["name"]), str(work / it["thumb"]), bool(faces) and it["name"] in near) for it in todo]
         found = {}
         # Low priority: an analysis running alongside needs little CPU, but needs it promptly to keep the GPUs fed.
-        with clock.step("images"), ProcessPoolExecutor(max_workers=jobs, initializer=os.nice, initargs=(10,)) as ex:
+        with clock.step("images"), _process_pool(jobs, initializer=os.nice, initargs=(10,)) as ex:
             for n, (it, res) in enumerate(zip(todo, ex.map(_scan_image, work_list, chunksize=4)), 1):
                 if "faces" in res:
                     found[it["name"]] = res.pop("faces")
@@ -1143,7 +1151,7 @@ def make_previews(src, work, items, names, jobs=None):
     todo = [n for n, r in rel.items() if not (work / r).exists()]
     if todo:
         print(f"[analyze] making {len(todo)} full-size previews", file=sys.stderr)
-        with ProcessPoolExecutor(max_workers=jobs) as ex:
+        with _process_pool(jobs) as ex:
             ok = list(ex.map(_full_preview, [(str(src / n), str(work / rel[n])) for n in todo], chunksize=4))
         for n, good in zip(todo, ok):
             if not good:
@@ -1390,8 +1398,6 @@ def _on_devices(fn, chunks, *args):
     weights), and separate processes also keep the Python work around each
     GPU (decoding, pre- and post-processing) from queueing on one interpreter.
     """
-    import multiprocessing
-
     def settle(job):
         try:
             return job.result()
@@ -1412,7 +1418,7 @@ def _on_devices(fn, chunks, *args):
     before = {v: os.environ.get(v) for v in limits}
     os.environ.update({v: str(WORKER_THREADS) for v in limits if before[v] is None})
     try:
-        with ProcessPoolExecutor(len(chunks), mp_context=multiprocessing.get_context("spawn")) as pool:
+        with _process_pool(len(chunks)) as pool:
             return [settle(j) for j in [pool.submit(fn, d, part, *args) for d, part in chunks]]
     finally:
         for v in limits:
@@ -1698,7 +1704,7 @@ def face_scores(work, paths, jobs=None):
         else:
             face_models()  # download once, before the workers start
             os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # the workers' model-loading chatter
-            with ProcessPoolExecutor(max_workers=jobs) as ex:
+            with _process_pool(jobs) as ex:
                 found = list(ex.map(_faces_in, [paths[n] for n in todo], chunksize=4))
         known = save_faces(work, dict(zip(todo, found)))
     return {n: known[n] for n in paths}
