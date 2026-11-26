@@ -11,7 +11,9 @@ Idempotent: running it twice produces no further changes.
 
 import argparse
 import difflib
+import os
 import re
+import tempfile
 import sys
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from pathlib import Path
 # is longer. Accepting them made format strings look like math.
 LATEX_HINT = re.compile(r"\\[A-Za-z]{2,}|[_^]\{")
 
-FENCE = re.compile(r"^\s*(?:```|~~~)")
+FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
 OPEN_DISPLAY = re.compile(r"^\s*\\?\[\s*$")
 CLOSE_DISPLAY = re.compile(r"^\s*\\?\]\s*$")
 
@@ -134,23 +136,45 @@ def _inline_sub(match: re.Match) -> str:
     return f"${body}$"
 
 
+def protected_lines(lines):
+    """True for YAML frontmatter at the top and for fenced code blocks, fence lines included.
+
+    Fences follow CommonMark: an opener is 3+ backticks or tildes indented at most 3 spaces;
+    only a run of the same character, at least as long, with nothing after it, closes it."""
+    out = [False] * len(lines)
+    start = 0
+    if lines and lines[0].rstrip() == "---":
+        for k in range(1, len(lines)):
+            if lines[k].rstrip() in ("---", "..."):
+                out[:k + 1] = [True] * (k + 1)
+                start = k + 1
+                break
+    fence = None
+    for k in range(start, len(lines)):
+        line = lines[k]
+        if fence is None:
+            m = FENCE_OPEN.match(line)
+            if m:
+                fence = m.group("fence")
+                out[k] = True
+        else:
+            out[k] = True
+            if re.match(r"^ {0,3}" + re.escape(fence[0]) + "{%d,}\\s*$" % len(fence), line):
+                fence = None
+    return out
+
+
 def convert(text: str) -> str:
     lines = text.split("\n")
+    protected = protected_lines(lines)
     out = []
     i = 0
-    in_fence = False
     in_display = False
 
     while i < len(lines):
         line = lines[i]
 
-        if FENCE.match(line):
-            in_fence = not in_fence
-            out.append(line)
-            i += 1
-            continue
-
-        if in_fence:
+        if protected[i] and not in_display:
             out.append(line)
             i += 1
             continue
@@ -261,6 +285,19 @@ def _read_setext_body(lines, start):
     return body, None
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write next to the file, then rename over it, so a crash never leaves half a note."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path, help="Markdown files to fix")
@@ -270,8 +307,12 @@ def main(argv=None):
 
     changed = False
     for path in args.paths:
-        original = path.read_text(encoding="utf-8")
-        updated = convert(original)
+        with open(path, encoding="utf-8", newline="") as f:
+            original = f.read()
+        crlf = "\r\n" in original
+        updated = convert(original.replace("\r\n", "\n"))
+        if crlf:
+            updated = updated.replace("\n", "\r\n")
         if original == updated:
             continue
         changed = True
@@ -280,7 +321,7 @@ def main(argv=None):
                 original.splitlines(True), updated.splitlines(True),
                 f"a/{path}", f"b/{path}"))
         else:
-            path.write_text(updated, encoding="utf-8")
+            _write_atomic(path, updated)
             print(f"updated {path}")
     return 1 if (changed and args.check) else 0
 

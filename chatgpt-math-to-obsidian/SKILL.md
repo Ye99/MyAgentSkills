@@ -189,7 +189,8 @@ Scoping is still the cheaper habit: run it on **the file you just pasted into**,
 - **A three-letter word vetoes a display block.** This is what keeps `[` / `- item one` / `]`
   and `[` / `plain text in brackets` / `]` out of rule 8. Prefer leaving a real formula
   unconverted to converting a list.
-- **Skip fenced code blocks and inline code spans.** Backslashes there are literal.
+- **Skip YAML frontmatter, fenced code blocks and inline code spans.** Backslashes there are literal.
+  A fence ends only at a run of the same character at least as long as the one that opened it.
 - **Leave unclosed or non-LaTeX brackets alone** rather than guessing.
 - **Never drop content.** Verify with `git diff` that only delimiters and trailing spaces moved,
   and that the line count is unchanged.
