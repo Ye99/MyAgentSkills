@@ -226,6 +226,7 @@ def _photo(path, seed=0, blur=0, orientation=None, when="2026:01:01 10:00:00", c
 
 
 def _folder(tmp_path):
+    pytest.importorskip("cv2")  # the scan measures sharpness with OpenCV
     src = tmp_path / "src"
     src.mkdir()
     _photo(src / "sharp.jpg", seed=1)
@@ -942,7 +943,6 @@ def test_facial_cards_say_why_a_frame_is_dropped(tmp_path):
 
 
 def test_faces_can_be_switched_off():
-    import argparse
     seen = {}
     orig = pc.cmd_analyze
     try:
@@ -1279,10 +1279,10 @@ def test_the_same_proposals_keep_the_same_plan_id(tmp_path):
 def test_apply_recovers_from_a_copy_that_was_cut_short(tmp_path):
     src, work, out, ov = _scanned(tmp_path)
     out.mkdir()
-    (out / "notes.txt.part").write_bytes(b"half a fi")  # what an interrupted run leaves behind
+    (out / (pc.PART_PREFIX + "notes.txt")).write_bytes(b"half a fi")  # what an interrupted run leaves behind
     pc.main(["apply", str(src), str(work), str(out), "--overrides", str(ov), "--apply"])
     assert _hashes(out)["notes.txt"] == _hashes(src)["notes.txt"]
-    assert not list(out.glob("*.part"))
+    assert not list(out.glob(pc.PART_PREFIX + "*"))
 
 
 def test_scanning_again_discards_full_size_previews_of_the_old_scan(tmp_path):
@@ -1350,6 +1350,7 @@ def test_photos_with_a_neighbour_in_time_are_the_only_possible_burst_members():
 
 
 def test_the_scan_reads_faces_from_the_pixels_it_already_decoded(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")  # _scan_image measures sharpness with OpenCV
     _photo(tmp_path / "a.jpg")
     monkeypatch.setattr(pc, "_faces_of", lambda rgb: [{"w": rgb.shape[1]}])
     with_faces = pc._scan_image((str(tmp_path / "a.jpg"), str(tmp_path / "t.jpg"), True))
@@ -1552,6 +1553,7 @@ def test_a_folder_with_nothing_to_judge_still_gets_a_plan(tmp_path):
 
 
 def test_a_failing_face_reader_does_not_make_the_photo_unreadable(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")  # _scan_image measures sharpness with OpenCV
     _photo(tmp_path / "a.jpg")
 
     def broken(rgb):

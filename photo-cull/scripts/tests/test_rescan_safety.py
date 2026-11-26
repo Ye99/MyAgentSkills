@@ -1,7 +1,6 @@
 """A plan is only applied to the exact files it was made from."""
 import json
 import os
-from pathlib import Path
 
 import pytest
 
