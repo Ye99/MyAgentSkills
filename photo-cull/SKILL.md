@@ -97,6 +97,10 @@ user reopens the page (their changes are still there) and downloads it again. If
 thresholds instead of many manual flips, re-run `analyze` with new values (see Tuning) and have
 them review again.
 
+The plan id also covers the size and modification time of every scanned file. `apply` refuses to
+copy when any file changed since the scan, and a new `scan` deletes the old `plan.json` and
+`review.html`, so a review always matches the files that will be copied.
+
 Report to the user: the counts `apply` prints, any `PROBLEMS`, and where `OUT` and the log are.
 
 ## Learning from the review

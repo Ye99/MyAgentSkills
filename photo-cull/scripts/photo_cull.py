@@ -752,8 +752,10 @@ def scan_list(src, work, clock, jobs=None):
                 sc = json.loads((src / j).read_text())
             except (OSError, ValueError):
                 pass
+        st = (src / name).stat()
         items.append({
             "name": name, "kind": kind, "mime": mime, "make": m.get("Make"),
+            "size": st.st_size, "mtime_ns": st.st_mtime_ns,  # apply refuses a file changed since
             "w": m.get("ImageWidth"), "h": m.get("ImageHeight"),
             "orientation": m.get("Orientation"), "t": capture_epoch(m, sc),
             "screenshot": kind == "image" and is_screenshot(name, m, sc),
@@ -838,6 +840,10 @@ def scan_start(src, work):
     shutil.rmtree(work / "thumbs", ignore_errors=True)
     (work / "thumbs").mkdir(parents=True)
     (work / "scan.json").unlink(missing_ok=True)
+    # A plan and review page describe the old scan; left in place they could
+    # be reviewed and applied to a folder whose files have since changed.
+    (work / "plan.json").unlink(missing_ok=True)
+    (work / "review.html").unlink(missing_ok=True)
     (work / SCANNING).touch()
 
 
@@ -1089,13 +1095,19 @@ pick(lastTab);
 """
 
 
-def plan_id(plan):
-    """Short fingerprint of what a plan proposes for every photo. The review
-    page puts it in overrides.json, and apply refuses overrides made against
-    different proposals: a re-run of analyze may propose leaving behind
-    photos the user never saw."""
+def scan_fingerprint(items):
+    """Name, size and mtime of every scanned file."""
+    return sorted((it["name"], it.get("size"), it.get("mtime_ns")) for it in items)
+
+
+def plan_id(plan, items):
+    """Short fingerprint of what a plan proposes for every photo, and of the
+    scanned files it was made from. The review page puts it in overrides.json,
+    and apply refuses overrides made against different proposals or files: a
+    re-run of analyze may propose leaving behind photos the user never saw,
+    and a rescan may have found different photos under the same names."""
     core = sorted((n, p["keep"], p["rotate"] if p["keep"] else 0) for n, p in plan.items())
-    return hashlib.sha256(json.dumps(core).encode()).hexdigest()[:12]
+    return hashlib.sha256(json.dumps([core, scan_fingerprint(items)]).encode()).hexdigest()[:12]
 
 
 def review_names(plan):
@@ -1147,7 +1159,7 @@ def write_outputs(work, items, plan, params, full=None):
     """
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
-    pid = plan_id(plan)
+    pid = plan_id(plan, items)
     (work / "plan.json").write_text(json.dumps({"id": pid, "params": params, "plan": plan}, indent=1))
     log_event(work, "analyze", "params", **params)
     data, shown, full = [], set(review_names(plan)), full or {}
@@ -1261,7 +1273,10 @@ def cmd_apply(args):
     plan = saved["plan"]
     overrides = json.loads(Path(args.overrides).read_text()) if args.overrides else {}
     reviewed = overrides.pop("_plan", None)
-    if args.overrides and reviewed != plan_id(plan):
+    if any("size" not in it or "mtime_ns" not in it for it in scan["items"]):
+        sys.exit("refusing to continue: this scan predates file size checks. "
+                 "Run scan and analyze again, then review.")
+    if args.overrides and reviewed != plan_id(plan, scan["items"]):
         sys.exit("refusing to continue: these overrides were not made against the current plan"
                  + (" (they carry no plan id)" if reviewed is None else " (analyze was run again since)")
                  + ". Open review.html again, review, and download a fresh overrides.json.")
@@ -1274,6 +1289,13 @@ def cmd_apply(args):
     if on_disk != set(final):
         sys.exit(f"source folder changed since the scan ({len(on_disk - set(final))} new, "
                  f"{len(set(final) - on_disk)} missing): re-run scan and analyze")
+    changed = []
+    for it in scan["items"]:
+        st = (src / it["name"]).stat()
+        if (st.st_size, st.st_mtime_ns) != (it["size"], it["mtime_ns"]):
+            changed.append(it["name"])
+    if changed:
+        sys.exit(f"{len(changed)} file(s) changed since the scan, e.g. {changed[:5]}: re-run scan and analyze")
     keep = sorted(n for n, d in final.items() if d["keep"])
     left = {n: d["reason"] for n, d in sorted(final.items()) if not d["keep"]}
     reasons = {}
