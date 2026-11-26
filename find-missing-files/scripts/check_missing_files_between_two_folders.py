@@ -68,13 +68,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('source', help='Path to the source folder (e.g. /path/to/source)')
     parser.add_argument('destination', help='Path to the destination folder (e.g. /path/to/destination)')
     parser.add_argument('--output', '-o', default='missing_files_tree.txt', help='Where to write the tree report (default: %(default)s)')
-    parser.add_argument('--src-skip-root-subdir', action='append', default=list(DEFAULT_SRC_SKIP_ROOT_SUBDIRS), help='Root-level subdirectories under source to skip entirely (default: Backedup)')
+    parser.add_argument('--src-skip-root-subdir', action='append', default=None, help='Root-level subdirectories under source to skip entirely, added to the default Backedup')
     parser.add_argument('--dest-skip-root-subdir', action='append', default=[], help='Root-level subdirectories under destination to skip (default: none)')
-    parser.add_argument('--skip-extension', action='append', default=list(DEFAULT_SKIP_EXTENSIONS), help='File extensions to ignore (case-insensitive, default: .THM, .LRV)')
+    parser.add_argument('--skip-extension', action='append', default=None, help='File extensions to ignore (case-insensitive), added to the defaults .THM and .LRV')
+    parser.add_argument('--no-default-skips', action='store_true', help='Drop the default skips (Backedup, .THM, .LRV) and compare everything not named explicitly')
     parser.add_argument('--chunk-size', type=int, default=1024 * 1024, help='Chunk size (bytes) used while hashing (default: 1 MiB)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Print progress details to stderr')
     parser.add_argument('--workers', type=int, default=os.cpu_count() or 1, help='Number of worker processes for hashing (default: CPU count)')
-    return parser.parse_args()
+    args = parser.parse_args()
+    keep_defaults = not args.no_default_skips
+    args.skip_extension = (list(DEFAULT_SKIP_EXTENSIONS) if keep_defaults else []) + (args.skip_extension or [])
+    args.src_skip_root_subdir = (list(DEFAULT_SRC_SKIP_ROOT_SUBDIRS) if keep_defaults else []) + (args.src_skip_root_subdir or [])
+    return args
 
 
 def log(message: str, verbose: bool) -> None:
@@ -218,7 +223,23 @@ def build_dest_index(dest: Path, skip_root_subdirs: Sequence[str], skip_extensio
     return index
 
 
-def build_dest_hash_sets(dest_index: Dict[int, List[Path]], chunk_size: int, workers: int, verbose: bool) -> Dict[int, Set[str]]:
+def collect_sizes(base: Path, skip_root_subdirs: Sequence[str], skip_extensions: Tuple[str, ...], verbose: bool) -> Set[int]:
+    """Sizes of the files under base. A file that cannot be stat'ed contributes nothing."""
+    sizes: Set[int] = set()
+    for _, path in iter_files(base, skip_root_subdirs, skip_extensions, verbose):
+        try:
+            sizes.add(path.stat().st_size)
+        except OSError:
+            continue
+    return sizes
+
+
+def build_dest_hash_sets(dest_index: Dict[int, List[Path]], chunk_size: int, workers: int, verbose: bool,
+                         only_sizes: Set[int] | None = None) -> Dict[int, Set[str]]:
+    """Hash destination files. With only_sizes, hash only files of those sizes: a destination
+    file whose size no source file has can never match one."""
+    if only_sizes is not None:
+        dest_index = {size: paths for size, paths in dest_index.items() if size in only_sizes}
     total_files = sum(len(paths) for paths in dest_index.values())
     jobs = (
         HashJob(rel=None, path=path, size=size)
@@ -325,8 +346,11 @@ def main() -> None:
 
     log('Building destination index...', args.verbose)
     dest_index = build_dest_index(dest, dest_skip_roots, skip_extensions, args.verbose)
+    log('Collecting source file sizes...', args.verbose)
+    src_sizes = collect_sizes(src, src_skip_roots, skip_extensions, args.verbose)
     log('Hashing destination files...', args.verbose)
-    dest_hash_sets = build_dest_hash_sets(dest_index, args.chunk_size, args.workers, args.verbose)
+    dest_hash_sets = build_dest_hash_sets(dest_index, args.chunk_size, args.workers, args.verbose,
+                                          only_sizes=src_sizes)
     log('Comparing source files...', args.verbose)
     missing = find_missing_files(src, dest_hash_sets, src_skip_roots, skip_extensions, args.chunk_size, args.workers, args.verbose)
 
