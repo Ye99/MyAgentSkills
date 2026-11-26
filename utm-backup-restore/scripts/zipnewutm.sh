@@ -11,6 +11,7 @@ Zips UTM .utm bundles using ditto to preserve macOS bundle metadata.
 Defaults:
   - If --dir is omitted, uses the current working directory.
   - Skips any .utm bundle when a .zip with the same base name already exists (unless --force).
+  - Each zip is written as NAME.zip.partial and renamed when complete.
 
 Options:
   --dir PATH     Directory containing .utm bundles to zip
@@ -134,11 +135,18 @@ for utm in "${utm_list[@]}"; do
 
   # Use ditto for zip creation to preserve macOS bundle metadata.
   # -V is the only native verbose output available.
-  if [ "$verbose" = true ]; then
-    ditto -c -k --sequesterRsrc --keepParent -V "$utm" "$zip_name"
-  else
-    ditto -c -k --sequesterRsrc --keepParent "$utm" "$zip_name"
+  # Write to a temporary name first: a half-written zip under the final name would be
+  # skipped as already done on the next run.
+  partial="${zip_name}.partial"
+  rm -f "$partial"
+  ditto_opts=( -c -k --sequesterRsrc --keepParent )
+  [ "$verbose" = true ] && ditto_opts+=( -V )
+  if ! ditto "${ditto_opts[@]}" "$utm" "$partial"; then
+    rm -f "$partial"
+    echo "Error: ditto failed for $utm; no zip written." >&2
+    exit 1
   fi
+  mv -f "$partial" "$zip_name"
 
   printf "%b[%d/%d]%b %bDone%b %b%s%b\n" \
     "$COLOR_INDEX" "$current_index" "$total_count" "$COLOR_RESET" \

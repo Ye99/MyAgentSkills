@@ -65,6 +65,8 @@ Use `ditto` for zip creation. Use the helper script in this skill when possible:
 zsh scripts/zipnewutm.sh --dir "/Volumes/T5/UTM"
 ```
 
+Each zip is written as `NAME.zip.partial` and renamed only when `ditto` finishes, so an interrupted run never leaves a zip that the next run would skip as done.
+
 ## Restore a zip backup
 Restores into the default UTM Documents folder:
 
@@ -75,7 +77,11 @@ zsh scripts/restoreutm.sh \
    "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.zip"
 ```
 
+It refuses when a bundle with the same name is already in the target folder, because extracting over it would mix the backup into the live VM. Move or delete that bundle first (with UTM quit), after the user confirms.
+
 ## Restore a `.utm`
+`ditto` merges into an existing bundle of the same name, so check the target folder has none first.
+
 ```bash
 ditto "/Volumes/T5/UTM/DevVM-YYYYMMDD-HHMMSS-InfoTag.utm" \
        "$HOME/Library/Containers/com.utmapp.UTM/Data/Documents/"
