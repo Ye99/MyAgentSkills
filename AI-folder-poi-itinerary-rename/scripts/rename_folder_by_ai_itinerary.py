@@ -828,13 +828,20 @@ def _run_opencode_with_retry(
     raise InferenceExhaustedError(last_error, attempt_count=attempts, attempt_failures=attempt_failures)
 
 
+# A model can return a sentence as a landmark; keep each token short and the
+# whole folder name well under the 255-byte limit of common filesystems,
+# leaving room for a "_2" style suffix from find_available_target.
+MAX_LANDMARK_TOKEN_CHARS = 40
+MAX_FOLDER_NAME_BYTES = 200
+
+
 def normalize_landmark_token(raw_name: str) -> str:
     normalized = unicodedata.normalize("NFKD", raw_name)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
     words = re.findall(r"[A-Za-z0-9]+", ascii_text)
     if not words:
         return UNKNOWN_LANDMARK
-    token = "".join(word[:1].upper() + word[1:] for word in words)
+    token = "".join(word[:1].upper() + word[1:] for word in words)[:MAX_LANDMARK_TOKEN_CHARS]
     return token if token else UNKNOWN_LANDMARK
 
 
@@ -1704,9 +1711,13 @@ def rank_landmarks_by_location_set_size(
 
 
 def build_target_folder_name(date_prefix: str, landmarks: list[str]) -> str:
-    if not landmarks:
-        return date_prefix
-    return f"{date_prefix}_{','.join(landmarks)}"
+    kept = list(landmarks)
+    while kept:
+        name = f"{date_prefix}_{','.join(kept)}"
+        if len(name.encode("utf-8")) <= MAX_FOLDER_NAME_BYTES:
+            return name
+        kept.pop()  # drop the least important landmark, never cut one mid-word
+    return date_prefix
 
 
 # Module-level lock to serialize find_available_target + rename in tree mode,
@@ -1891,9 +1902,15 @@ def process_folder_tree(
                 home_gps=home_gps,
             )
         except Exception as exc:  # noqa: BLE001
+            # Merge into the existing state so finished inferences, config and
+            # fingerprint survive and the next run can resume from them.
+            previous_state = read_json_file(default_state_file(folder)) or {}
+            if previous_state.get("folder_path") not in (None, str(folder)):
+                previous_state = {}
             write_json_file(
                 default_state_file(folder),
                 {
+                    **previous_state,
                     "folder_path": str(folder),
                     "status": "failed-exception",
                     "error": {"message": str(exc)},
