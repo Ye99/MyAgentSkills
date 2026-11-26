@@ -662,6 +662,26 @@ def _register_heif():
         pass
 
 
+HEIF_EXT = (".heic", ".heif")
+
+
+def _heif_available():
+    try:
+        import pillow_heif  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _require_heif(names, why):
+    """Stop when HEIC photos are present but cannot be decoded; without
+    pillow-heif they would be judged unreadable or copied unchecked."""
+    heic = [n for n in names if n.lower().endswith(HEIF_EXT)]
+    if heic and not _heif_available():
+        sys.exit(f"{len(heic)} HEIC photo(s), e.g. {heic[0]}, cannot be decoded to {why}: "
+                 "install pillow-heif (pip install pillow-heif) and run again.")
+
+
 def pixels(path):
     """Decoded RGB pixels as displayed (orientation flags applied)."""
     import numpy as np
@@ -745,6 +765,7 @@ def scan_list(src, work, clock, jobs=None):
     log_event(work, "scan", "start", src=str(src.resolve()), files=len(media), json_sidecars=len(jsons))
     print(f"[scan] {len(media)} files + {len(jsons)} json sidecars", file=sys.stderr)
 
+    _require_heif(media, "make thumbnails")
     with clock.step("metadata"):
         meta = read_metadata(src, media, jobs)
     sidecars, orphans = match_sidecars(media, jsons)
@@ -1314,6 +1335,7 @@ def cmd_apply(args):
                "rotate": sum(1 for n in keep if final[n]["rotate"]),
                "overrides": len(overrides),
                "keep_gb": round(sum((src / n).stat().st_size for n in keep) / 1e9, 2)}
+    _require_heif([n for n in keep if final[n]["rotate"]], "check their rotation")
     print(f"[apply] {summary}")
     if not args.apply:
         print("[apply] dry run, nothing copied. Re-run with --apply.")
@@ -1327,7 +1349,11 @@ def cmd_apply(args):
     out.mkdir(parents=True, exist_ok=True)
     report = {"src": str(src), "out": str(out), "kept": {}, "left_behind": left, "problems": []}
     for k, name in enumerate(keep, 1):
-        fields, problem = _place(src / name, out / name, final[name]["rotate"])
+        try:
+            fields, problem = _place(src / name, out / name, final[name]["rotate"])
+        except Exception as e:  # one bad file must not stop the run before its report is written
+            fields, problem = {"rotate": 0, "verified": "ERROR"}, f"copy failed: {e}"
+            (out / (PART_PREFIX + name)).unlink(missing_ok=True)
         report["kept"][name] = fields
         log_event(work, "apply", "kept", file=name, **fields)
         if problem:
