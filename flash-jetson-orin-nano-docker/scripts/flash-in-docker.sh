@@ -13,6 +13,9 @@ storage=${2:-nvme0n1p1}
 image=${3:-l4t-flash:24.04}
 log="$(dirname "$l4t")/flash-$(date +%Y%m%d-%H%M%S).log"
 
+lsusb | grep -qE '0955:7[0-9a-f]{3}' || { echo "ERROR: no Jetson on USB" >&2; exit 1; }
+lsusb | grep -E '0955:7020' && { echo "ERROR: Jetson is booted normally, not in recovery mode" >&2; exit 1; }
+
 # NVIDIA's network_prerequisite() runs "service nfs-kernel-server restart" and
 # "rpcbind" unconditionally. Inside a container that restarts the host kernel's
 # nfsd from the wrong namespace and the target's NFS mount then times out.
@@ -27,6 +30,7 @@ chmod 755 "$shim/noop"
 # the host path it is told about, and nfs_check() compares against host exports.
 # USER=root: l4t_create_images_for_kernel_flash.sh checks $USER, which Docker
 # leaves unset.
+set +e
 docker run --rm --privileged --network host -e USER=root \
 	-v /dev:/dev -v /sys:/sys \
 	-v "$l4t":"$l4t" -w "$l4t" \
@@ -35,6 +39,14 @@ docker run --rm --privileged --network host -e USER=root \
 	"$image" bash -c '
 mkdir -p /run/nvidia_initrd_flash && touch /run/nvidia_initrd_flash/docker_host_network
 ./nvsdkmanager_flash.sh --storage "$1"
-echo "FLASH_RC=$?"' _ "$storage" 2>&1 | tee "$log"
+rc=$?
+echo "FLASH_RC=$rc"
+exit $rc' _ "$storage" 2>&1 | tee "$log"
+rc=${PIPESTATUS[0]}
+set -e
 
+if [ "$rc" -ne 0 ]; then
+	echo "ERROR: flash FAILED (exit $rc). log: $log" >&2
+	exit 1
+fi
 echo "log: $log"

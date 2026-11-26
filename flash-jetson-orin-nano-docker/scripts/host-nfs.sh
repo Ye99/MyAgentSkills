@@ -24,12 +24,14 @@
 # the target loses NFS/ssh about a minute into a flash or backup.
 set -euo pipefail
 
-STATE=/var/tmp/jetson-flash-nfs.state
+# The JETSON_NFS_* overrides exist for the tests, which must never touch the real files.
+STATE=${JETSON_NFS_STATE:-/var/tmp/jetson-flash-nfs.state}
+EXPORTS=${JETSON_NFS_EXPORTS:-/etc/exports}
 NFS_UNITS=(nfs-mountd nfs-idmapd nfsdcld rpc-statd)
 # Same options NVIDIA's l4t_kernel_flash_vars.func uses (PERMISSION_STR).
 OPTS="rw,nohide,insecure,no_subtree_check,async,no_root_squash"
 CLIENTS="fc00:1:1::/48"
-NM_CONF=/etc/NetworkManager/conf.d/99-jetson-flash-temp.conf
+NM_CONF=${JETSON_NFS_NM_CONF:-/etc/NetworkManager/conf.d/99-jetson-flash-temp.conf}
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
@@ -48,13 +50,13 @@ up() {
 	for d in "${dirs[@]}"; do mkdir -p "$d"; chown root:root "$d"; chmod 755 "$d"; done
 
 	: > "$STATE"
-	if [ -f /etc/exports ]; then
-		cp -a /etc/exports /etc/exports.jetson-flash.bak; echo "exports=backup" >> "$STATE"
+	if [ -f "$EXPORTS" ]; then
+		cp -a "$EXPORTS" "$EXPORTS.jetson-flash.bak"; echo "exports=backup" >> "$STATE"
 	else
 		echo "exports=absent" >> "$STATE"
 	fi
-	echo '# jetson-flash (temporary)' >> /etc/exports
-	for d in "${dirs[@]}"; do printf '%s %s(%s)\n' "$d" "$CLIENTS" "$OPTS" >> /etc/exports; done
+	echo '# jetson-flash (temporary)' >> "$EXPORTS"
+	for d in "${dirs[@]}"; do printf '%s %s(%s)\n' "$d" "$CLIENTS" "$OPTS" >> "$EXPORTS"; done
 
 	local u masked=()
 	for u in "${NFS_UNITS[@]}"; do
@@ -104,9 +106,9 @@ down() {
 	fi
 
 	if [ "$exports" = backup ]; then
-		mv /etc/exports.jetson-flash.bak /etc/exports
+		mv "$EXPORTS.jetson-flash.bak" "$EXPORTS"
 	else
-		rm -f /etc/exports
+		rm -f "$EXPORTS"
 	fi
 	exportfs -ra || true
 
