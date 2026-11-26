@@ -12,7 +12,7 @@ map="$dir/nvpartitionmap.txt"
 fail=0 n=0
 # Lines: board_spec,<spec>  then  file,partition,start,size,type,sha256
 # "|| [ -n "$file" ]" keeps a last line with no trailing newline from being skipped.
-while IFS=, read -r file part start size type sum || [ -n "$file" ]; do
+while IFS=, read -r file part _start _size _type sum || [ -n "$file" ]; do
 	[ "$file" = board_spec ] && { echo "board_spec: $part"; continue; }
 	n=$((n + 1))
 	if [ ! -f "$dir/$file" ]; then

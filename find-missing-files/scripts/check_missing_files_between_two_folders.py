@@ -211,7 +211,7 @@ def parallel_hash_jobs(jobs: Iterable[HashJob], chunk_size: int, workers: int) -
 def build_dest_index(dest: Path, skip_root_subdirs: Sequence[str], skip_extensions: Tuple[str, ...], verbose: bool):
     index: Dict[int, List[Path]] = defaultdict(list)
     total = 0
-    for rel, path in iter_files(dest, skip_root_subdirs, skip_extensions, verbose):
+    for _rel, path in iter_files(dest, skip_root_subdirs, skip_extensions, verbose):
         try:
             size = path.stat().st_size
         except (OSError, PermissionError) as exc:

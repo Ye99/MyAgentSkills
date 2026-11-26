@@ -543,7 +543,7 @@ def find_primary_irot(buf):
     iprp = list(_boxes(buf, *meta[b"iprp"]))
     props = [list(_boxes(buf, s, e)) for t, s, e in iprp if t == b"ipco"]
     props = props[0] if props else []
-    for t, s, e in iprp:
+    for t, s, _e in iprp:
         if t != b"ipma":
             continue
         version, wide = buf[s], buf[s + 3] & 1
@@ -1773,8 +1773,9 @@ def _composition_on(dev, jobs, model_name, batch=8):
     def answer(question, imgs, words):
         x = proc(text=[ask(question)] * len(imgs), images=[[im] for im in imgs], return_tensors="pt", padding=True).to(dev)
         with torch.no_grad():  # only the answer position goes through the vocabulary layer: same numbers, less work
-            last = model.model(**x).last_hidden_state[:, -1]
-            return model.lm_head(last)[:, ids(words)].float().softmax(-1).tolist()
+            # ruff reads the later `del model` as leaving this closure variable undefined.
+            last = model.model(**x).last_hidden_state[:, -1]  # noqa: F821
+            return model.lm_head(last)[:, ids(words)].float().softmax(-1).tolist()  # noqa: F821
     out = []
     for a in range(0, len(jobs), batch):
         here = [k for k, (path, _) in enumerate(jobs[a:a + batch]) if _await(path)]
