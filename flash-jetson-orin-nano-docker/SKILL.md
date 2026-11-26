@@ -66,7 +66,8 @@ Set `WORK=<dir with ~25 GB free, not under /tmp>`, `SKILL=<this skill dir>`, `L4
 8. **Flash**: `bash $SKILL/scripts/flash-in-docker.sh $L4T nvme0n1p1` (run in the
    background; 10-20 min). The board type is auto-detected from EEPROM
    (e.g. `jetson-orin-nano-devkit-super`). Success ends with
-   `Successfully flashed the QSPI.`, `Flash is successful`, and `FLASH_RC=0`.
+   `Successfully flashed the QSPI.`, `Flash is successful`, and `FLASH_RC=0`; the script
+   exits non-zero when the flash fails, and refuses to start unless a Jetson is in recovery mode.
    On success the script reboots the target; with the jumper still fitted it
    may come back up in recovery mode, which is harmless.
 9. **Clean up the host**: `sudo bash $SKILL/scripts/host-nfs.sh down` and
