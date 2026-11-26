@@ -396,6 +396,8 @@ class OrganizeMediaByLocalDateTests(unittest.TestCase):
                 )
 
         self.assertEqual(missing, [])
+        # only destination files the size of some source file are worth hashing
+        self.assertEqual(fake_module.build_dest_hash_sets.call_args.kwargs.get("only_sizes"), {1})
         self.assertEqual(
             phase_messages,
             [

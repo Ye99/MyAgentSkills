@@ -664,7 +664,15 @@ def verify_with_find_missing(
         dest_index = module.build_dest_index(destination_root, (), skip_extensions, verbose)
         if phase_callback is not None:
             phase_callback("verification: hashing destination files")
-        dest_hash_sets = module.build_dest_hash_sets(dest_index, 1024 * 1024, workers, verbose)
+        source_sizes = set()
+        for source_path in media_source_paths:
+            try:
+                source_sizes.add(source_path.stat().st_size)
+            except OSError:
+                continue  # an unreadable source is reported missing by the comparison
+        dest_hash_sets = module.build_dest_hash_sets(
+            dest_index, 1024 * 1024, workers, verbose, only_sizes=source_sizes
+        )
         if phase_callback is not None:
             phase_callback("verification: comparing source files")
         missing_rel = module.find_missing_files(

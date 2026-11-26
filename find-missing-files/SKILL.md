@@ -45,8 +45,9 @@ python scripts/check_missing_files_between_two_folders.py <source> <destination>
 | Flag | Default | Description |
 |---|---|---|
 | `--output`, `-o` | `missing_files_tree.txt` | Output file path for the tree report |
-| `--skip-extension` | `.THM`, `.LRV` | Extensions to ignore (repeatable) |
-| `--src-skip-root-subdir` | `Backedup` | Top-level subdirs of source to skip (repeatable) |
+| `--skip-extension` | `.THM`, `.LRV` | Extensions to ignore (repeatable, added to the defaults) |
+| `--src-skip-root-subdir` | `Backedup` | Top-level subdirs of source to skip (repeatable, added to the default) |
+| `--no-default-skips` | off | Drop the defaults above, so `Backedup`, `.THM` and `.LRV` files are compared too |
 | `--dest-skip-root-subdir` | _(none)_ | Top-level subdirs of destination to skip (repeatable) |
 | `--verbose`, `-v` | off | Print progress to stderr |
 | `--workers` | CPU count | Number of parallel hashing workers |
@@ -57,7 +58,7 @@ python scripts/check_missing_files_between_two_folders.py <source> <destination>
 python scripts/check_missing_files_between_two_folders.py \
     /path/to/source \
     /path/to/destination \
-    --skip-extension .THM --skip-extension .LRV \
+    --skip-extension .AAE \
     --output ~/missing_files.txt \
     --verbose
 ```
@@ -76,6 +77,8 @@ A tree-formatted text file listing all source files with no content match in the
 ```
 
 If nothing is missing, the file contains: `|-- No missing files (everything matched)`
+
+Only destination files the same size as some source file are hashed, since no other file can match.
 
 ## Running Tests
 
