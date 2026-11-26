@@ -112,7 +112,11 @@ def cmd_merge(args):
     resolved = json.loads(pathlib.Path(args.places).read_text())
     for key, rec in resolved.items():
         if key in data["places"] and rec.get("lat") is not None:
-            data["places"][key].update(rec)
+            place = data["places"][key]
+            # A re-resolve may find no feature ID; a stale one would point at the old place.
+            if not rec.get("id"):
+                place.pop("id", None)
+            place.update(rec)
     missing = [k for k, p in data["places"].items() if p.get("lat") is None]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
     print("unresolved:", ", ".join(missing) if missing else "none")
