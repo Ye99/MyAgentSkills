@@ -63,8 +63,7 @@ python scripts/dedup_and_copy.py \
 python scripts/verify_dedup_copy.py \
     /path/to/source \
     /path/to/destination \
-    --log /path/to/dedup_log.json \
-    --spot-check 10
+    --log /path/to/dedup_log.json
 ```
 
 ## Key Options
@@ -80,6 +79,9 @@ python scripts/verify_dedup_copy.py \
 | `--exclude-ext` | *(none)* | File extensions to skip (repeatable) |
 | `--exclude-name` | *(none)* | Exact basenames to skip (repeatable) |
 | `--dry-run` | off | Print what would be copied without copying |
+| `--resume` | off | Continue into a non-empty destination left by an interrupted run. Files already there must match the source; a different file is reported, never overwritten |
+
+The destination must be empty (unless `--resume`) and must not be inside the source. Each file in a duplicate set is hashed again against its keeper at copy time: a file edited after `jdupes` ran is copied, not skipped, and listed under `no_longer_duplicates` in the log.
 
 ### verify_dedup_copy.py
 
@@ -88,7 +90,6 @@ python scripts/verify_dedup_copy.py \
 | `source` | *(required)* | Source directory |
 | `destination` | *(required)* | Target directory |
 | `--log` | *(required)* | Path to the dedup_log.json |
-| `--spot-check` | `10` | Number of random files to SHA-256 verify |
 
 ## Duplicate Selection (Keeper Scoring)
 
@@ -114,6 +115,7 @@ Ties broken alphabetically for determinism.
       "set_id": 1,
       "kept": "relative/path/to/kept_file.jpg",
       "kept_score": 12.5,
+      "kept_sha256": "…",
       "skipped": [
         { "path": "relative/path/to/dup.jpg", "score": 45.2 }
       ]
@@ -139,7 +141,7 @@ The verification script performs five independent checks:
 | Arithmetic | `scanned - skipped == copied` and matches actual target count |
 | Accounting | Every source file is either in target or in a skip list |
 | Keepers present | Every "kept" file from the log exists in the target |
-| Content integrity | SHA-256 spot-check of N random target files against source |
+| Content integrity | SHA-256 of every target file against its source, and of every skipped duplicate against its keeper |
 | No extras | Target contains no files absent from source |
 
 ## Common Mistakes
