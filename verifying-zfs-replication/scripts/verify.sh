@@ -8,13 +8,17 @@
 # because hashing takes as long as reading the changed data on the slower host. The hashing jobs themselves
 # run detached on each host in ~/zfs-verify-<to-snap>/, so a dropped connection only stops the polling:
 # rerun the same command and it resumes waiting (it never restarts a finished or running job).
+# The work dir name hashes all six arguments plus the createtxg of both snapshots on both sides, so another
+# dataset with the same snapshot names, or a target that was received again, never reuses old results.
+#   --fresh   delete this run's work dir on both hosts first and recompute everything
 # Env: THREADS (default 4) parallel files per host; POLL (default 60) seconds between checks.
 set -euo pipefail
-[ $# -eq 6 ] || { sed -n '2,12p' "$0"; exit 2; }
+FRESH=0
+[ "${1:-}" = --fresh ] && { FRESH=1; shift; }
+[ $# -eq 6 ] || { sed -n '2,16p' "$0"; exit 2; }
 SH=$1 SD=$2 DH=$3 DD=$4 FROM=$5 TO=$6
 THREADS=${THREADS:-4} POLL=${POLL:-60}
 HERE=$(cd "$(dirname "$0")" && pwd)
-W="zfs-verify-$TO"                      # work dir under each host's home
 LOCAL=$(mktemp -d)
 # Run a command on a host under bash, whatever the login shell is (zsh does not word-split, and errors on
 # unmatched globs). The command text arrives on stdin, so it never appears in a process list either.
@@ -37,8 +41,21 @@ tok=$(r "$DH" "zfs get -H -o value receive_resume_token $DD")
 SM=$(r "$SH" "zfs get -H -o value mountpoint $SD"); DM=$(r "$DH" "zfs get -H -o value mountpoint $DD")
 case "$SM$DM" in *legacy*|*none*) echo "FAIL: dataset needs a real mountpoint for .zfs/snapshot access"; exit 1;; esac
 
+# Work dir under each host's home, unique to these arguments and these exact snapshots (a re-received
+# snapshot keeps its name and GUID but gets a new createtxg).
+txg(){ r "$1" "zfs get -Hp -o value createtxg $2"; }
+PARAMS="$SH $SD $DH $DD $FROM $TO $(txg "$SH" "$SD@$FROM") $(txg "$SH" "$SD@$TO") $(txg "$DH" "$DD@$FROM") $(txg "$DH" "$DD@$TO")"
+W="zfs-verify-$TO-$(printf '%s' "$PARAMS" | sha256sum | cut -c1-12)"
+for h in "$SH" "$DH"; do
+  [ "$FRESH" = 1 ] && r "$h" "rm -rf ~/$W"
+  stamp=$(r "$h" "cat ~/$W/params 2>/dev/null || true")
+  if [ -n "$stamp" ] && [ "$stamp" != "$PARAMS" ]; then
+    echo "FAIL: ~/$W on $h was made for other params ($stamp); rerun with --fresh"; exit 1
+  fi
+done
+
 echo "== 2. changed paths between @$FROM and @$TO (source)"
-r "$SH" "mkdir -p ~/$W"; r "$DH" "mkdir -p ~/$W"
+for h in "$SH" "$DH"; do r "$h" "mkdir -p ~/$W && printf '%s\\n' '$PARAMS' > ~/$W/params"; done
 for h in "$SH" "$DH"; do scp -q "$HERE/manifest.py" "$HERE/changed_paths.py" "$h:$W/"; done
 if ! r "$SH" "test -s ~/$W/present.nul"; then
   r "$SH" "cd ~/$W && sudo -n zfs diff -FH $SD@$FROM $SD@$TO > zfsdiff.txt && python3 -I changed_paths.py '$SM' . < zfsdiff.txt"
