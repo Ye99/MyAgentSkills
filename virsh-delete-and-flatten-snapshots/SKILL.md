@@ -38,7 +38,11 @@ If `snapshot-list` fails with domain not found, ask whether the VM might live un
 - `reclaim-space` mode destroys all snapshot restore points and keeps only the VM's current state.
 - Deleting all snapshot metadata is only the prerequisite for reclaiming space. Actual reclaim happens later when the overlay chain is committed, the VM is repointed to the base qcow2, and obsolete overlay files are deleted.
 - This behavior comes from external snapshot design: overlay qcow2 files can remain structurally required even after libvirt snapshot metadata is gone.
-- Do not delete overlay files until the chain has been committed, the VM definition has been updated, and verification shows the base qcow2 has no backing chain.
+- Do not delete overlay files until the chain has been committed, the VM definition has been updated, and verification shows the new base's backing chain is exactly what was below the overlays: no backing file for a plain VM, only the original template for a linked clone.
+- Commit only the overlays the snapshots created (`virsh snapshot-dumpxml <vm> <snapshot>` lists each one). For a linked clone of a template, the VM's own disk is the new base: never commit into the template, which other clones share.
+- Refuse if any image you would commit into or delete is in another domain's backing chain.
+- Handle every disk the VM has (`virsh domblklist <vm> --details`, device `disk`), not only the first row: it can be a CD-ROM.
+- Gather and validate the whole plan before deleting any snapshot metadata; the overlay list comes from that metadata.
 - Prefer exact snapshot names from `virsh snapshot-list` output instead of retyping from memory.
 
 ## Workflow
@@ -134,10 +138,10 @@ Expected pattern for external snapshots:
 - `domblklist` points at the top overlay, not the base qcow2
 - `qemu-img info --backing-chain` shows overlay -> backing overlay(s) -> base qcow2
 
-Record these before changing anything:
-- the active disk path from `domblklist`
-- the ordered overlay chain from `qemu-img info --backing-chain`, excluding the final base image entry
-- the base qcow2 path
+Record these before changing anything (and before deleting the snapshot metadata, which names the overlays):
+- every disk's active path from `domblklist --details` (device `disk`)
+- the overlays the snapshots created (`virsh snapshot-dumpxml <vm> <snapshot>`), in the order `qemu-img info --backing-chain` reports them from the top
+- the new base for each disk: the first image below those overlays (for a linked clone, the VM's own disk, not the template)
 - the directory containing those disk files
 
 ### 6. Flatten the chain offline
@@ -152,8 +156,8 @@ sudo -n qemu-img commit -p /var/lib/libvirt/images/vm.middle-overlay
 Rules:
 - Commit top to bottom, never bottom to top.
 - Wait for each `qemu-img commit -p` to finish before starting the next one.
-- Commit each overlay entry except the final base image.
-- If there are `N` overlay layers above the base image, run `N` commits.
+- Commit only the overlays the snapshots created, stopping at the first image no snapshot created.
+- If there are `N` such overlays above the new base, run `N` commits.
 - Do not guess the chain order. Use the order reported by `qemu-img info --backing-chain`.
 
 ### 7. Repoint libvirt to the base qcow2
@@ -180,7 +184,7 @@ sudo -n qemu-img info --backing-chain <base-qcow2-path>
 
 Success criteria:
 - `domblklist` now points directly to the base qcow2
-- `qemu-img info --backing-chain` shows no backing file
+- `qemu-img info --backing-chain` shows no backing file (for a linked clone: only the original template)
 
 ### 9. Delete obsolete overlay files
 Only after the verification above succeeds:
