@@ -47,7 +47,8 @@ Run `outline.py` on the note. Note especially:
 Decide 3–12 topic notes. A good note name is what someone would type into search: a shared prefix from the original name plus the specific topic and key nouns, e.g. `Garden Irrigation Controllers Wiring and Troubleshooting` split from `Garden`. Avoid `\ / : * ? " < > | # ^ [ ]` in names.
 
 Write `plan.json` (format in the `split_note.py` docstring). Each note lists `[first_line, last_line, heading_shift]` segments in the order they should appear; segments can come from anywhere in the source. Guidance:
-- Assign **every** line, blank lines included, to exactly one note. The index holds no original text, so lines before the first heading (an opening remark, for example) must also go into a topic note.
+- Assign **every** line, blank lines included, to exactly one note. The index holds no original text other than the source's YAML frontmatter, so lines before the first heading (an opening remark, for example) must also go into a topic note.
+- If the source starts with YAML frontmatter, leave those lines out of every segment: they stay at the top of the index note so its tags and aliases keep working. Start the first segment on the line after the closing `---`.
 - Set `index.intro` if the default wording does not fit, e.g. to say where the pre-split version is kept (git history, a backup copy).
 - Put material that has no better home into a sensible catch-all note rather than forcing it somewhere wrong; a chronological log can stay chronological.
 - Choose `heading_shift` per segment so each note's top sections become `##` (the script adds the `#` title). A continuation segment with no heading of its own uses the shift of the section it continues.
