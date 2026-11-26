@@ -83,11 +83,12 @@ def _work(tmp_path, names):
     work.mkdir()
     for n in names:
         (src / n).write_text(n)
-    (work / "scan.json").write_text(json.dumps(
-        {"orphan_json": [], "items": [{"name": n, "kind": "other", "sidecars": []} for n in names]}))
-    (work / "plan.json").write_text(json.dumps({"id": pc.plan_id({}), "params": {}, "plan": {}}))
+    items = [{"name": n, "kind": "other", "sidecars": [],
+              "size": (src / n).stat().st_size, "mtime_ns": (src / n).stat().st_mtime_ns} for n in names]
+    (work / "scan.json").write_text(json.dumps({"orphan_json": [], "items": items}))
+    (work / "plan.json").write_text(json.dumps({"id": pc.plan_id({}, items), "params": {}, "plan": {}}))
     ov = tmp_path / "overrides.json"
-    ov.write_text(json.dumps({"_plan": pc.plan_id({})}))
+    ov.write_text(json.dumps({"_plan": pc.plan_id({}, items)}))
     return src, work, out, ov
 
 
