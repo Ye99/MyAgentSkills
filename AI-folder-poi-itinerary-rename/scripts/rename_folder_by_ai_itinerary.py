@@ -1043,6 +1043,12 @@ def _has_rate_limit_hint(detail: str) -> bool:
     )
 
 
+# After this many inferences in a row fail even after their retries, the
+# backend is taken to be down and the rest of the run fails fast instead of
+# spending the full retry budget on every folder.
+MAX_CONSECUTIVE_INFERENCE_FAILURES = 3
+
+
 @dataclass
 class SchedulerTaskResult:
     info: dict[str, str]
@@ -1071,6 +1077,7 @@ class SharedInferenceScheduler:
         self._server_factory = server_factory
         self._owns_servers = server_factory is not None
         self._start_error: Exception | None = None
+        self._consecutive_failures = 0
         self._timeout_sec = opencode_timeout_sec
         self._retries = opencode_retries
         self._backoff_sec = opencode_backoff_sec
@@ -1129,6 +1136,19 @@ class SharedInferenceScheduler:
                     )
                 )
                 return future
+            if self._consecutive_failures >= MAX_CONSECUTIVE_INFERENCE_FAILURES:
+                future = Future()
+                future.set_exception(
+                    InferenceExhaustedError(
+                        f"stopped after {self._consecutive_failures} consecutive inference failures",
+                        attempt_count=0,
+                        attempt_failures=[
+                            {"attempt": 0, "failure_type": "circuit-open",
+                             "detail": "backend looks down; rerun to resume"}
+                        ],
+                    )
+                )
+                return future
             existing = self._futures.get(task_key)
             if existing is not None:
                 self._metrics["dedupe_hit_total"] += 1
@@ -1140,7 +1160,6 @@ class SharedInferenceScheduler:
             return future
 
     def _worker_loop(self, handle: OpencodeServerHandle) -> None:
-        session_id: str | None = None
         while True:
             item = self._queue.get()
             if item is None:
@@ -1168,14 +1187,20 @@ class SharedInferenceScheduler:
                     cache=None,
                     strict=True,
                     opencode_attach_url=handle.url,
-                    opencode_session_id=session_id,
+                    # A fresh session per place: reusing one let earlier
+                    # coordinates and answers sit in the model's context.
+                    opencode_session_id=None,
                     diagnostics=diagnostics,
                 )
-                session_value = diagnostics.get("opencode_session_id")
-                if isinstance(session_value, str) and session_value:
-                    session_id = session_value
+                with self._lock:
+                    self._consecutive_failures = 0
                 future.set_result(SchedulerTaskResult(info=info, diagnostics=diagnostics))
             except Exception as exc:  # noqa: BLE001
+                with self._lock:
+                    self._consecutive_failures += 1
+                    # Forget the failed key so a later folder can try it again.
+                    if self._futures.get(task_key) is future:
+                        del self._futures[task_key]
                 if isinstance(exc, InferenceExhaustedError):
                     future.set_exception(exc)
                 else:
