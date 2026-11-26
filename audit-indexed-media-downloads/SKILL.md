@@ -39,6 +39,7 @@ Treat indexed MP4 names as the local authority for subtitle prefixes and SHA-256
 - An unindexed SRT is renamed only when its normalized title matches exactly one indexed, unsuffixed MP4.
 - Never infer an unindexed video's number from a numeric gap. Obtain it from an authoritative playlist or download manifest.
 - An existing destination with different content blocks the entire apply operation.
+- Before deleting anything, `--apply` re-hashes each duplicate and its keeper and checks every rename target; a file changed since the inventory stops the run with nothing changed.
 - Duplicate deletion requires identical SHA-256 content. The keeper preference is indexed, then unsuffixed, then shortest deterministic name.
 - `--apply` permanently deletes proven duplicates; it does not move them to Trash. Confirm authorization immediately before using it.
 - Same-content files with different normalized titles require manual review and are not deleted automatically.
