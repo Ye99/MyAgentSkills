@@ -4,6 +4,15 @@
 #   ssh <host> 'MODE=pre bash -s' < postcheck.sh
 S(){ for c in /usr/bin/sudo /usr/lib/cargo/bin/sudo /usr/bin/sudo.ws; do [ -x "$c" ] && { "$c" -n "$@"; return; }; done; }
 ok(){ echo "OK   $*"; }; fail(){ echo "FAIL $*"; }; info(){ echo "INFO $*"; }
+# Every sudoers file must end in a newline. An empty sudoers.d is fine: nullglob keeps
+# the unmatched pattern from being checked as a file named "*".
+check_sudoers_newlines(){
+  local main=$1 dir=$2 f
+  local -a files
+  shopt -s nullglob; files=("$main" "$dir"/*); shopt -u nullglob
+  for f in "${files[@]}"; do [ "$(S tail -c 1 "$f" | od -An -tx1 | tr -d ' \n')" = 0a ] || fail "sudoers $f lacks trailing newline"; done
+}
+[ "${POSTCHECK_FUNCS_ONLY:-}" = 1 ] && return 0
 MODE=${MODE:-post}
 
 info "mode $MODE: $(. /etc/os-release; echo "$PRETTY_NAME"), running kernel $(uname -r)"
@@ -30,7 +39,7 @@ S netplan generate 2>/dev/null && ok "netplan generate" || fail "netplan generat
 for u in ssh.socket ssh.service; do info "$u $(systemctl is-enabled $u 2>/dev/null)"; done
 systemctl is-enabled ssh.socket 2>/dev/null | grep -q enabled || systemctl is-enabled ssh.service 2>/dev/null | grep -q enabled \
   && ok "ssh will start at boot" || fail "neither ssh.socket nor ssh.service enabled"
-for f in /etc/sudoers /etc/sudoers.d/*; do [ "$(S tail -c 1 "$f" | xxd -p)" = 0a ] || fail "sudoers $f lacks trailing newline"; done
+check_sudoers_newlines /etc/sudoers /etc/sudoers.d
 S visudo -c >/dev/null 2>&1 && ok "visudo -c" || fail "visudo -c"
 
 if [ "$MODE" = post ]; then
