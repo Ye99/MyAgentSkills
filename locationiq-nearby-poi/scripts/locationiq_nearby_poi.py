@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
-from typing import Any
+import time
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -20,7 +22,13 @@ def fetch_nearby_poi(
     tag: str = "all",
     radius: int = 1000,
     region: str = "us1",
+    *,
+    max_attempts: int = 5,
+    initial_backoff_sec: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, Any]]:
+    """Fetch nearby POI. A per-second or per-minute rate limit (HTTP 429) is retried with
+    exponential backoff and jitter, up to max_attempts calls; a daily limit stops at once."""
     if region not in {"us1", "eu1"}:
         raise ValueError("region must be 'us1' or 'eu1'")
 
@@ -34,14 +42,26 @@ def fetch_nearby_poi(
     }
     endpoint = f"https://{region}.locationiq.com/v1/nearby?{urlencode(params)}"
 
-    try:
-        with urlopen(endpoint, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LocationIQ HTTP {exc.code}: {message}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Network error calling LocationIQ: {exc.reason}") from exc
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with urlopen(endpoint, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429 and "Rate Limited Day" in message:
+                raise RuntimeError(
+                    f"LocationIQ daily quota used up (HTTP 429: {message}); try again after it resets"
+                ) from exc
+            if exc.code == 429 and attempt < max_attempts:
+                delay = initial_backoff_sec * (2 ** (attempt - 1))
+                sleep(delay + random.uniform(0, delay / 2))
+                continue
+            raise RuntimeError(f"LocationIQ HTTP {exc.code}: {message}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Network error calling LocationIQ: {exc.reason}") from exc
 
     if not isinstance(data, list):
         raise RuntimeError(f"Unexpected response: {data}")
