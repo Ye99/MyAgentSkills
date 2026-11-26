@@ -28,7 +28,7 @@ from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 DATE_PREFIX_RE = re.compile(r"^(\d{4}_\d{2}_\d{2})")
@@ -874,7 +874,9 @@ def infer_landmark_info(
         return cache[rounded]
 
     result: dict[str, str] = {"landmark": UNKNOWN_LANDMARK, "country": "UnknownCountry"}
-    if has_opencode_command():
+    # A running server is reached over HTTP, so the local CLI is only needed
+    # when there is no server to attach to.
+    if opencode_attach_url or has_opencode_command():
         prompt = (
             "Infer one well-known landmark and country near the provided coordinates using general geographic knowledge only. "
             "Do not call any reverse geocoding service. "
@@ -1041,16 +1043,27 @@ class SchedulerTaskResult:
 
 
 class SharedInferenceScheduler:
+    """Runs inferences on a pool of opencode servers.
+
+    With ``server_factory`` the servers start on the first ``submit`` (so a run
+    that needs no inference starts none) and are stopped by ``shutdown``. A
+    failed start fails every request at once and is not retried.
+    """
+
     def __init__(
         self,
-        servers: list[OpencodeServerHandle],
+        servers: list[OpencodeServerHandle] | None,
         *,
         opencode_timeout_sec: int,
         opencode_retries: int,
         opencode_backoff_sec: float,
         opencode_model: str | None,
+        server_factory: Callable[[], list[OpencodeServerHandle]] | None = None,
     ) -> None:
-        self._servers = list(servers)
+        self._servers = list(servers or [])
+        self._server_factory = server_factory
+        self._owns_servers = server_factory is not None
+        self._start_error: Exception | None = None
         self._timeout_sec = opencode_timeout_sec
         self._retries = opencode_retries
         self._backoff_sec = opencode_backoff_sec
@@ -1066,10 +1079,27 @@ class SharedInferenceScheduler:
             "executed_total": 0,
         }
         self._threads: list[threading.Thread] = []
+        self._started = False
+        if server_factory is None:
+            self._start_threads()
+
+    def _start_threads(self) -> None:
+        self._started = True
         for handle in self._servers:
             thread = threading.Thread(target=self._worker_loop, args=(handle,), daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    def _ensure_started_locked(self) -> None:
+        if self._started or self._start_error is not None:
+            return
+        assert self._server_factory is not None
+        try:
+            self._servers = list(self._server_factory())
+        except Exception as exc:  # noqa: BLE001
+            self._start_error = exc
+            return
+        self._start_threads()
 
     def submit(self, key: tuple[float, float], cluster: LocationCluster) -> Future[SchedulerTaskResult]:
         task_key = (key[0], key[1], self._model or "")
@@ -1078,6 +1108,19 @@ class SharedInferenceScheduler:
             if self._closed:
                 future: Future[SchedulerTaskResult] = Future()
                 future.set_exception(InferenceExhaustedError("scheduler closed", attempt_count=0))
+                return future
+            self._ensure_started_locked()
+            if self._start_error is not None:
+                future = Future()
+                future.set_exception(
+                    InferenceExhaustedError(
+                        f"server pool start failed: {self._start_error}",
+                        attempt_count=0,
+                        attempt_failures=[
+                            {"attempt": 0, "failure_type": "server-start", "detail": str(self._start_error)}
+                        ],
+                    )
+                )
                 return future
             existing = self._futures.get(task_key)
             if existing is not None:
@@ -1166,6 +1209,8 @@ class SharedInferenceScheduler:
             self._queue.put(None)
         for thread in self._threads:
             thread.join(timeout=5)
+        if self._owns_servers:
+            stop_opencode_server_pool(self._servers)
 
 
 def infer_pending_cluster_infos(
@@ -1805,32 +1850,19 @@ def process_folder_tree(
         total=len(day_folders), apply=apply, root=str(root), ratio=ratio,
     )
     progress.print_start()
-    shared_server_pool: list[OpencodeServerHandle] | None = None
     inference_scheduler: SharedInferenceScheduler | None = None
 
     if inference_workers > 1:
-        try:
-            shared_server_pool = start_opencode_server_pool(inference_workers)
-            inference_scheduler = SharedInferenceScheduler(
-                shared_server_pool,
-                opencode_timeout_sec=opencode_timeout_sec,
-                opencode_retries=opencode_retries,
-                opencode_backoff_sec=opencode_backoff_sec,
-                opencode_model=opencode_model,
-            )
-        except Exception as exc:  # noqa: BLE001
-            summary: dict[str, Any] = {
-                "root_path": str(root),
-                "status": "failed-server-start",
-                "total_folder_count": len(day_folders),
-                "failed_folder_count": len(day_folders),
-                "error": {"message": str(exc)},
-                "tree_state_file": str(default_tree_state_file(root)),
-                "tree_report_file": str(default_tree_report_file(root)),
-            }
-            write_json_file(default_tree_state_file(root), summary)
-            write_json_file(default_tree_report_file(root), summary)
-            return summary
+        # Servers start on the first inference a folder actually needs, so a
+        # resumed or media-less tree starts none.
+        inference_scheduler = SharedInferenceScheduler(
+            None,
+            server_factory=lambda: start_opencode_server_pool(inference_workers),
+            opencode_timeout_sec=opencode_timeout_sec,
+            opencode_retries=opencode_retries,
+            opencode_backoff_sec=opencode_backoff_sec,
+            opencode_model=opencode_model,
+        )
 
     def run_folder(index: int, folder: Path) -> tuple[int, dict[str, Any]]:
         try:
@@ -1845,7 +1877,7 @@ def process_folder_tree(
                 opencode_backoff_sec=opencode_backoff_sec,
                 opencode_model=opencode_model,
                 inference_workers=inference_workers,
-                server_pool=shared_server_pool,
+                server_pool=None,
                 inference_scheduler=inference_scheduler,
                 state_file=default_state_file(folder),
                 report_file=default_report_file(folder),
@@ -1905,8 +1937,6 @@ def process_folder_tree(
     finally:
         if inference_scheduler is not None:
             inference_scheduler.shutdown(cancel_pending=cancelled)
-        if shared_server_pool is not None:
-            stop_opencode_server_pool(shared_server_pool)
 
     materialized_results: list[dict[str, Any]] = [result for result in folder_results if isinstance(result, dict)]
 
