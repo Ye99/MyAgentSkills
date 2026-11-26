@@ -125,7 +125,7 @@ Optional:
 
 - `--recording-timezone <IANA>` — timezone where media was recorded (e.g. `Asia/Shanghai`). Required when media files lack GPS; script scans and exits with count if needed.
 - `--camera-timezone <IANA>` — timezone the camera clock was set to, when it differs from `--recording-timezone` (e.g. GoPro left on `America/Los_Angeles` while filming in `Asia/Shanghai`). Requires `--recording-timezone`. Both zones are needed: the camera stores only a wall-clock reading, and the correction is the gap between the two zones.
-- `--signature-cache <path>`
+- `--signature-cache <path>` — default `~/.cache/organize-photos-and-videos-by-day/signature_type_cache.json` (or under `$XDG_CACHE_HOME`). An older cache next to the script is still read.
 - `--workers <n>`
 - `--verbose`
 
