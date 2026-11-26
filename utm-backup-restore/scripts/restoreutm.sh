@@ -20,6 +20,7 @@ Options:
 
 Notes:
   - Prefer restoring while UTM is quit to avoid file contention.
+  - Refuses to restore over an existing bundle of the same name.
 EOF
 }
 
@@ -96,7 +97,27 @@ fi
 
 mkdir -p "$restore_dir"
 
+# Extract into a temporary folder beside the target, so an existing VM bundle with the same
+# name is never merged with or overwritten by the backup.
+staging="$(mktemp -d "$restore_dir/.restoreutm.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+
 # Use ditto for extraction to preserve macOS bundle metadata.
-ditto -x -k "$zip_path" "$restore_dir"
+ditto -x -k "$zip_path" "$staging"
+
+items=( "$staging"/*(DN) )
+if [ "${#items[@]}" -eq 0 ]; then
+  echo "Error: $zip_path contained nothing to restore." >&2
+  exit 1
+fi
+for item in "${items[@]}"; do
+  if [ -e "$restore_dir/${item:t}" ]; then
+    echo "Error: $restore_dir/${item:t} already exists; move or delete it first (quit UTM), then rerun." >&2
+    exit 1
+  fi
+done
+for item in "${items[@]}"; do
+  mv "$item" "$restore_dir/"
+done
 
 echo "Restored to $restore_dir"
