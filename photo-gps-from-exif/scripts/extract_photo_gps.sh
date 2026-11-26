@@ -21,10 +21,20 @@ fi
 tmp_output="$(mktemp)"
 trap 'rm -f "$tmp_output"' EXIT
 
+# exiftool exits 1 when any one file fails, but still prints the rest, so keep the report
+# unless it produced nothing at all.
+rc=0
 if [[ -d "$target" ]]; then
-  exiftool -r -ext jpg -ext jpeg -ext heic -ext mov -n -FileName -GPSLatitude -GPSLongitude "$target" >"$tmp_output"
+  exiftool -r -ext jpg -ext jpeg -ext heic -ext mov -n -FileName -GPSLatitude -GPSLongitude "$target" >"$tmp_output" || rc=$?
 else
-  exiftool -n -FileName -GPSLatitude -GPSLongitude "$target" >"$tmp_output"
+  exiftool -n -FileName -GPSLatitude -GPSLongitude "$target" >"$tmp_output" || rc=$?
+fi
+if [[ $rc -ne 0 ]]; then
+  if [[ ! -s "$tmp_output" ]]; then
+    printf 'Error: exiftool failed (exit %s) and read nothing.\n' "$rc" >&2
+    exit 1
+  fi
+  printf 'Warning: exiftool exited %s; some files could not be read (see its messages above).\n' "$rc" >&2
 fi
 
 python3 - "$tmp_output" <<'PY'
