@@ -460,7 +460,19 @@ def _create_timezone_lookup(cache_precision: int = 3) -> Callable[[float, float]
     return lookup
 
 
+# Before the cache moved to the user's cache folder it was written next to
+# this script; it is still read once so earlier lookups are not lost.
+LEGACY_SIGNATURE_CACHE = Path(__file__).resolve().parent / "signature_type_cache.json"
+
+
+def default_signature_cache_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "organize-photos-and-videos-by-day" / "signature_type_cache.json"
+
+
 def _load_signature_cache(path: Path) -> dict[str, str]:
+    if not path.exists() and path == default_signature_cache_path() and LEGACY_SIGNATURE_CACHE.exists():
+        path = LEGACY_SIGNATURE_CACHE
     if not path.exists():
         return {}
     try:
@@ -727,8 +739,9 @@ def main() -> int:
     parser.add_argument("destination_root", help="Destination root")
     parser.add_argument(
         "--signature-cache",
-        default=str(Path(__file__).resolve().parent / "signature_type_cache.json"),
-        help="Path to signature classification cache JSON",
+        default=None,
+        help="Path to signature classification cache JSON "
+             "(default: $XDG_CACHE_HOME or ~/.cache, organize-photos-and-videos-by-day/signature_type_cache.json)",
     )
     parser.add_argument(
         "--report",
@@ -756,7 +769,8 @@ def main() -> int:
     source_root = Path(args.source_root).expanduser().resolve()
     destination_root = Path(args.destination_root).expanduser().resolve()
     report_path = Path(args.report).expanduser().resolve()
-    cache_path = Path(args.signature_cache).expanduser().resolve()
+    cache_path = (Path(args.signature_cache).expanduser().resolve() if args.signature_cache
+                  else default_signature_cache_path())
 
     recording_tz: ZoneInfo | None = None
     if args.recording_timezone is not None:
@@ -780,7 +794,8 @@ def main() -> int:
     if not source_root.is_dir():
         print(f"Source root not found: {source_root}", file=sys.stderr)
         return 2
-    destination_root.mkdir(parents=True, exist_ok=True)
+    if args.apply:  # a dry run writes nothing under the destination
+        destination_root.mkdir(parents=True, exist_ok=True)
 
     signature_cache = _load_signature_cache(cache_path)
     timezone_lookup = _create_timezone_lookup()
@@ -879,7 +894,8 @@ def main() -> int:
         year_folder = capture_dt.strftime("%Y")
         day_folder = capture_dt.strftime("%Y_%m_%d")
         target_dir = destination_root / year_folder / day_folder
-        target_dir.mkdir(parents=True, exist_ok=True)
+        if args.apply:
+            target_dir.mkdir(parents=True, exist_ok=True)
         target_path = next_collision_path(
             target_dir / source_path.name,
             existing_destinations,
