@@ -134,9 +134,9 @@ Run:
 
 ```bash
 python3 folder-poi-itinerary-rename/scripts/rename_folder_with_poi_itinerary.py \
-  "/home/ye/Pictures/2025" \
-  --report-json "/home/ye/Pictures/2025/folder_poi_itinerary_rename_report.json" \
-  --state-json "/home/ye/Pictures/2025/folder_poi_itinerary_rename_state.json"
+  "$HOME/Pictures/2025" \
+  --report-json "$HOME/Pictures/2025/folder_poi_itinerary_rename_report.json" \
+  --state-json "$HOME/Pictures/2025/folder_poi_itinerary_rename_state.json"
 ```
 
 Interrupt once with Ctrl+C during processing.

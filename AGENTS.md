@@ -68,4 +68,4 @@ The five canonical triage roles, using their default label strings. See `docs/ag
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root, neither created yet. Skills create them when a term or decision is first settled; until then, proceed without them. See `docs/agents/domain.md`.

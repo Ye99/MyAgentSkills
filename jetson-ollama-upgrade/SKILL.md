@@ -24,7 +24,7 @@ HTTP 412 - requires a newer version of Ollama
 ## Inputs To Confirm
 
 1. SSH host (default: `jetsonorinwhitewifi`)
-2. `jetson-containers` path on device (default: `/home/ye/p/jetson-containers`)
+2. `jetson-containers` checkout on the device; set `JC=<that path>` (for example `JC='~/p/jetson-containers'`, quoted so `~` expands on the device)
 3. Target package (`ollama`)
 
 ## Core Workflow
@@ -38,7 +38,7 @@ ssh "$HOST" "uname -m; cat /etc/nv_tegra_release; nvcc --version"
 2. Update `jetson-containers`:
 
 ```bash
-ssh "$HOST" "git -C /home/ye/p/jetson-containers pull --rebase origin master"
+ssh "$HOST" "git -C $JC pull --rebase origin master"
 ```
 
 3. Confirm Ollama pin in package config:
@@ -46,7 +46,7 @@ ssh "$HOST" "git -C /home/ye/p/jetson-containers pull --rebase origin master"
 ```bash
 ssh "$HOST" "python3 - <<'PY'
 from pathlib import Path
-p = Path('/home/ye/p/jetson-containers/packages/llm/ollama/config.py')
+p = Path('$JC/packages/llm/ollama/config.py').expanduser()
 print(p.read_text())
 PY"
 ```
@@ -54,7 +54,7 @@ PY"
 4. Start build in tmux (long-running):
 
 ```bash
-ssh "$HOST" "tmux new-session -d -s ollama-build 'cd /home/ye/p/jetson-containers && jetson-containers build ollama 2>&1 | tee /tmp/ollama-build.log'"
+ssh "$HOST" "tmux new-session -d -s ollama-build 'cd $JC && jetson-containers build ollama 2>&1 | tee /tmp/ollama-build.log'"
 ```
 
 5. Monitor progress:
@@ -73,7 +73,7 @@ ssh "$HOST" "docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep 
 7. Verify autotag resolves to local build:
 
 ```bash
-ssh "$HOST" "cd /home/ye/p/jetson-containers && jetson-containers autotag ollama"
+ssh "$HOST" "cd $JC && jetson-containers autotag ollama"
 ```
 
 8. Smoke test model pull:
