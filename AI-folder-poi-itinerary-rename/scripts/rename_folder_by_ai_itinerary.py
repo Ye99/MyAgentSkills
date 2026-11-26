@@ -18,6 +18,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import sys
 import subprocess
 import tempfile
@@ -985,22 +986,22 @@ def start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> 
     url = f"http://127.0.0.1:{port}"
     deadline = time.time() + startup_timeout_sec
     health_url = f"{url}/global/health"
-    while time.time() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"worker-{worker_id} opencode serve exited early code={process.returncode}")
-        try:
-            with urllib.request.urlopen(health_url, timeout=1.0) as response:
-                if response.status == 200:
-                    return OpencodeServerHandle(worker_id=worker_id, port=port, url=url, process=process)
-        except Exception:
-            time.sleep(0.2)
-
-    process.terminate()
+    handle = OpencodeServerHandle(worker_id=worker_id, port=port, url=url, process=process)
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-    raise RuntimeError(f"worker-{worker_id} timed out waiting for opencode serve health")
+        while time.time() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f"worker-{worker_id} opencode serve exited early code={process.returncode}")
+            try:
+                with urllib.request.urlopen(health_url, timeout=1.0) as response:
+                    if response.status == 200:
+                        return handle
+            except Exception:
+                time.sleep(0.2)
+        raise RuntimeError(f"worker-{worker_id} timed out waiting for opencode serve health")
+    except BaseException:
+        # Includes Ctrl-C while waiting: never leave the server running.
+        stop_opencode_server(handle)
+        raise
 
 
 def stop_opencode_server(handle: OpencodeServerHandle) -> None:
@@ -1020,7 +1021,7 @@ def start_opencode_server_pool(worker_count: int) -> list[OpencodeServerHandle]:
     for worker_id in range(max(1, worker_count)):
         try:
             servers.append(start_opencode_server(worker_id=worker_id))
-        except Exception:
+        except BaseException:
             for started in servers:
                 stop_opencode_server(started)
             raise
@@ -2707,9 +2708,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _install_sigterm_handler() -> None:
+    """Unwind on SIGTERM like on Ctrl-C, so finally-blocks stop opencode servers."""
+
+    def _on_sigterm(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def _exit_code(result: dict[str, Any]) -> int:
+    status = str(result.get("status") or "")
+    return 1 if status.startswith("failed") or status == "completed-with-failures" else 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    _install_sigterm_handler()
 
     folder = Path(args.folder).expanduser().resolve()
     if not folder.exists() or not folder.is_dir():
@@ -2757,7 +2773,7 @@ def main() -> int:
             home_gps=home_gps,
         )
     print(json.dumps(result, ensure_ascii=True, indent=2))
-    return 0
+    return _exit_code(result)
 
 
 if __name__ == "__main__":

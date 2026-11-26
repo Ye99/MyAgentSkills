@@ -36,6 +36,7 @@ Rename day folders like `2025_07_24` to itinerary-ordered landmark names by scan
 13. Record persistent landmark-inference failures in both files: report keeps summary, state keeps detailed failure log for troubleshooting and resume.
 14. Accept either a single day folder (`YYYY_MM_DD*`) or a tree root (for example `/Pictures`) and process all day folders under it.
 15. At tree-run end, perform integrity checks: math reconciliation of folder counts plus filesystem cross-check of renamed target folders.
+16. Exit with status 1 when any folder failed or the integrity check failed, so scripts can tell. Ctrl-C or SIGTERM stops every `opencode serve` the run started.
 
 ## Name Format
 
