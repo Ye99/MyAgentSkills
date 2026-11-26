@@ -22,7 +22,7 @@ plan.json:
 }
 
 Content is moved, never reworded. The only edits to original lines are:
-  1. heading depth: a heading outside code fences loses `shift` leading `#` (result must stay >= H2);
+  1. heading depth: a heading outside code fences and frontmatter loses `shift` leading `#` (result must stay >= H2);
   2. link targets: heading links whose heading moved to a different note get that note's name as target
      (same-note [[#H]], [[Source#H]], markdown (#h) / (Source.md#H)), inside the split notes and in other vault notes.
 Added lines: YAML frontmatter, an H1 title and a one-line description quote per note, and the index note.
@@ -37,7 +37,7 @@ Verification (exit 1 on any failure):
 """
 import argparse, collections, hashlib, json, pathlib, re, sys, urllib.parse
 
-FENCE = re.compile(r"^\s*(```|~~~)")
+FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
 HEAD = re.compile(r"^(#{1,6}) (.*)$")
 WIKI = re.compile(r"(!?)\[\[([^\]|#]*)(#[^\]|]*)?(\|[^\]]*)?\]\]")
 MDLINK = re.compile(r"\]\(([^)\s]+)\)")
@@ -58,12 +58,31 @@ def read_lines(p):
 
 
 def fence_flags(lines):
-    out, fence = [], False
-    for l in lines:
-        if FENCE.match(l):
-            out.append(True); fence = not fence
+    """True for each line that headings and links must not touch: YAML frontmatter at the top
+    of the file and fenced code blocks, fence lines included.
+
+    Fences follow CommonMark: an opener is 3+ backticks or tildes indented at most 3 spaces;
+    only a run of the same character, at least as long, with nothing after it, closes it."""
+    out = [False] * len(lines)
+    start = 0
+    if lines and lines[0].rstrip() == "---":
+        for k in range(1, len(lines)):
+            if lines[k].rstrip() in ("---", "..."):
+                out[:k + 1] = [True] * (k + 1)
+                start = k + 1
+                break
+    fence = None
+    for k in range(start, len(lines)):
+        l = lines[k]
+        if fence is None:
+            m = FENCE_OPEN.match(l)
+            if m:
+                fence = m.group("fence")
+                out[k] = True
         else:
-            out.append(fence)
+            out[k] = True
+            if re.match(r"^ {0,3}" + re.escape(fence[0]) + "{%d,}\\s*$" % len(fence), l):
+                fence = None
     return out
 
 
@@ -242,11 +261,9 @@ def main():
     for n in notes:
         name = n["name"]
         text = (notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")
-        heads, fence, h2 = [], False, None
-        for l in text:
-            if FENCE.match(l):
-                fence = not fence; continue
-            m = None if fence else HEAD.match(l)
+        heads, h2 = [], None
+        for l, fl in zip(text, fence_flags(text)):
+            m = None if fl else HEAD.match(l)
             if m and len(m.group(1)) in (2, 3):
                 if len(m.group(1)) == 2:
                     h2 = m.group(2)
@@ -333,22 +350,22 @@ def main():
                 err(f"rewrite {rel}:{k} changed beyond link targets")
 
     # ---- C. independent multiset check -----------------------------------------------------------------
-    def norm_lines(ls):
-        res, fence = [], False
-        for l in ls:
-            if FENCE.match(l):
-                fence = not fence; res.append(l); continue
-            if not fence:
+    def norm_lines(ls, flags):
+        res = []
+        for l, fl in zip(ls, flags):
+            if not fl:
                 l = re.sub(r"^#{1,6} ", "# ", l)
                 l = re.sub(r"(!?)\[\[[^\]|#]*#", r"\1[[#", l)
                 l = re.sub(r"\]\([^)\s#]*\.md#", "](#", l)
             if l.strip():
                 res.append(l)
         return collections.Counter(res)
-    before = norm_lines(lines)
+    before = norm_lines(lines, fenced)
     after = collections.Counter()
-    for name, (hdr, _) in mapping.items():
-        after += norm_lines((notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")[:-1][hdr:])
+    for name, (hdr, idx) in mapping.items():
+        # each body line keeps the code/frontmatter status of the source line it came from
+        after += norm_lines((notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")[:-1][hdr:],
+                            [fenced[i - 1] for i, _, _ in idx])
     missing, extra = before - after, after - before
     for l, c in list(missing.items())[:10]:
         err(f"multiset: missing {c}x: {l[:90]}")
@@ -358,11 +375,10 @@ def main():
     # ---- D. link resolution inside outputs ------------------------------------------------------------
     heads_of = {}
     for name in names + [stem]:
-        fence, hs = False, []
-        for l in (notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n"):
-            if FENCE.match(l):
-                fence = not fence; continue
-            m = None if fence else HEAD.match(l)
+        hs = []
+        text = (notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")
+        for l, fl in zip(text, fence_flags(text)):
+            m = None if fl else HEAD.match(l)
             if m:
                 hs.append((len(m.group(1)), m.group(2)))
         heads_of[name] = hs
@@ -386,11 +402,9 @@ def main():
     checked = 0
     outputs = [(n, notes_dir / f"{n}.md") for n in names + [stem]] + [(None, out / "rewrites" / r) for r in rewrites]
     for here, p in outputs:
-        fence = False
-        for l in p.read_text(encoding="utf-8").split("\n"):
-            if FENCE.match(l):
-                fence = not fence; continue
-            if fence:
+        text = p.read_text(encoding="utf-8").split("\n")
+        for l, fl in zip(text, fence_flags(text)):
+            if fl:
                 continue
             for m in WIKI.finditer(l):
                 target, frag = m.group(2), m.group(3)
