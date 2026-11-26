@@ -11,7 +11,7 @@ IMAGE_SKILLS = {
         "description_terms": ("base64", "without OCR", "externalize base64"),
     },
     "externalize-image-and-extract-text": {
-        "description_terms": ("OCR", "extract text from image", "image conversion"),
+        "description_terms": ("assets folder", "explicitly asks to OCR", "transcribe"),
     },
     "rewrite-obsidian-image-notes": {
         "description_terms": ("replaced by editable Markdown",),
@@ -21,7 +21,8 @@ IMAGE_SKILLS = {
 ROUTING_ROWS = (
     ("base64", "only wants assets extracted", "extract-embedded-images"),
     ("replaced by editable Markdown", "rewrite-obsidian-image-notes"),
-    ("keep/externalize", "also add its text", "externalize-image-and-extract-text"),
+    ("moved to assets with a working link", "`externalize-image-and-extract-text` (default mode)"),
+    ("explicitly asked to OCR / transcribe", "`externalize-image-and-extract-text` (with transcription)"),
 )
 
 

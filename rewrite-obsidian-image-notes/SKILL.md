@@ -24,7 +24,8 @@ extracted, use `extract-embedded-images` instead.
 | --- | --- |
 | Note contains `[ref]: <data:image/...;base64,...>` and the user only wants assets extracted | `extract-embedded-images` |
 | Note embeds an image and the user wants the image replaced by editable Markdown | `rewrite-obsidian-image-notes` |
-| User wants to keep/externalize the image and also add its text to the note | `externalize-image-and-extract-text` |
+| Note image, including a root-level `![[Pasted image ....png]]`, should be moved to assets with a working link | `externalize-image-and-extract-text` (default mode) |
+| User explicitly asked to OCR / transcribe / extract the image's text into the note | `externalize-image-and-extract-text` (with transcription) |
 
 ## Workflow
 

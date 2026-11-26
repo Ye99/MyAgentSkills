@@ -42,9 +42,9 @@ If the user wants an existing image embed replaced by editable Markdown, use `re
 | Scenario | Use |
 | --- | --- |
 | Note contains `[ref]: <data:image/...;base64,...>` and the user only wants assets extracted | `extract-embedded-images` |
-| Image is already a file, including a root-level `![[Pasted image ....png]]`, and the user wants it in an assets folder | `externalize-image-and-extract-text` |
-| User wants that on-disk image kept and its text added to the note | `externalize-image-and-extract-text` |
 | Note embeds an image and the user wants the image replaced by editable Markdown | `rewrite-obsidian-image-notes` |
+| Note image, including a root-level `![[Pasted image ....png]]`, should be moved to assets with a working link | `externalize-image-and-extract-text` (default mode) |
+| User explicitly asked to OCR / transcribe / extract the image's text into the note | `externalize-image-and-extract-text` (with transcription) |
 
 ## What it produces
 
