@@ -426,8 +426,8 @@ def parse_exif_datetime(value: str | None) -> datetime | None:
 
 
 def _extract_timestamp(record: dict[str, object]) -> datetime | None:
-    for field in ("DateTimeOriginal", "CreateDate", "MediaCreateDate", "TrackCreateDate", "FileModifyDate"):
-        value = record.get(field)
+    for tag in ("DateTimeOriginal", "CreateDate", "MediaCreateDate", "TrackCreateDate", "FileModifyDate"):
+        value = record.get(tag)
         parsed = parse_exif_datetime(value if isinstance(value, str) else None)
         if parsed is not None:
             return parsed
@@ -465,7 +465,7 @@ def resolve_home_gps(home_photo: Path | None = None) -> tuple[float, float]:
         try:
             lat, lon = float(parts[0].strip()), float(parts[1].strip())
         except ValueError:
-            raise SystemExit(f"HOME_GPS must be 'lat,lon' with valid floats, got: {env_val!r}")
+            raise SystemExit(f"HOME_GPS must be 'lat,lon' with valid floats, got: {env_val!r}") from None
         if lat == 0.0 and lon == 0.0:
             raise SystemExit("HOME_GPS is (0,0) — likely invalid")
         return lat, lon
@@ -1766,8 +1766,8 @@ def _validate_target_within_parent(parent: Path, target: Path) -> None:
     # Use os.path.commonpath to avoid symlink tricks
     try:
         common = Path(os.path.commonpath([resolved_parent, resolved_target]))
-    except ValueError:
-        raise ValueError(f"target path escapes parent directory: {target}")
+    except ValueError as err:
+        raise ValueError(f"target path escapes parent directory: {target}") from err
     if common != resolved_parent:
         raise ValueError(f"target path escapes parent directory: {target}")
 

@@ -1,5 +1,4 @@
 """Opencode servers start only when an inference is needed, and stop after."""
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any

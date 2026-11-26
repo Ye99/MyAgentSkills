@@ -1443,7 +1443,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
 
             with patch("rename_folder_by_ai_itinerary.extract_media_points", side_effect=fake_extract):
                 with patch("rename_folder_by_ai_itinerary._run_opencode_http_with_retry", side_effect=fake_http_retry):
-                    summary = mod.process_folder_tree(root, apply=True, ratio=1.0)
+                    mod.process_folder_tree(root, apply=True, ratio=1.0)
 
             # After rename, the original day_folder should not exist
             self.assertFalse(day_folder.exists())
@@ -1463,8 +1463,6 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
                 mod.MediaPoint(str(folder / "a.jpg"), 10.0, 10.0, datetime(2025, 7, 24, 9, 0)),
                 mod.MediaPoint(str(folder / "b.jpg"), 20.0, 20.0, datetime(2025, 7, 24, 12, 0)),
             ]
-
-            call_count = 0
 
             def fake_extract(f: Path) -> tuple[list[mod.MediaPoint], list[str]]:
                 return (points, [])

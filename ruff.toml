@@ -1,0 +1,6 @@
+# Lint used by CI (.github/workflows/ci.yml). Pyflakes (F) and bugbear (B) only.
+[lint]
+select = ["F", "B"]
+# B905 asks for zip(strict=...). Adding strict=True changes runtime behaviour (it raises on
+# unequal lengths), so each call site needs its own review; left for a separate pass.
+ignore = ["B905"]

@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import re
 import subprocess
 from pathlib import Path
 

@@ -73,7 +73,7 @@ def nfs(tools, tmp_path):
     _stub(bin_, "id", 'echo 0')
     _stub(bin_, "sysctl", 'echo 0')
     _stub(bin_, "exportfs", rec)
-    _stub(bin_, "showmount", f'echo "Export list"; grep -v "^#" "$JETSON_NFS_EXPORTS" | cut -d" " -f1')
+    _stub(bin_, "showmount", 'echo "Export list"; grep -v "^#" "$JETSON_NFS_EXPORTS" | cut -d" " -f1')
     _stub(bin_, "nmcli", rec)
     _stub(bin_, "ufw", rec + '\n[ "$1" = status ] && echo "Status: inactive"; true')
     _stub(bin_, "systemctl", rec + f'''
