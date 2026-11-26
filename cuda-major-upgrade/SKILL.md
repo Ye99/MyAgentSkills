@@ -289,7 +289,9 @@ sudo shutdown -r +1 "CUDA upgrade: rebooting to activate new driver"
 ```
 
 Use `+1` rather than `now` so the user can `sudo shutdown -c` if they need to save work.
-Tell them the log path before the session dies. Remove the unit and script afterwards.
+Tell them the log path (`/var/log/cuda-verify.log`) before the session dies. The log ends with
+`RESULT: PASS` or `RESULT: FAIL` naming the failed checks, and the unit exits non-zero on a
+failure, so `systemctl status cuda-verify.service` shows it too. Remove the unit and script afterwards.
 
 ## Step 8 — Verify with real compute
 
