@@ -26,7 +26,7 @@ Rename day folders like `2025_07_24` to itinerary-ordered landmark names by scan
 3. Sort media in capture-time order.
 4. Infer landmark token candidates for the sorted path.
 5. Keep unique landmarks in first-seen itinerary order.
-6. Rename folder with comma-joined landmark tokens.
+6. Rename folder with comma-joined landmark tokens. Each token is capped at 40 characters, and the least important landmarks are dropped until the name fits in 200 bytes.
 7. If confidence is low, return `UnknownLandmark` and skip it from folder name.
 8. Cluster location sets using distance only (`--cluster-distance-m`), no time-gap rule.
 9. For merged multi-family/multi-continent same-day media, keep a single renamed day folder; do not split by country.
