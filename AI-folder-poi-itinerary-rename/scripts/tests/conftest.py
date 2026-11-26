@@ -23,3 +23,7 @@ def _isolate_opencode(monkeypatch):
         raise RuntimeError("tests must not start a real opencode server")
 
     monkeypatch.setattr(mod, "start_opencode_server", _refuse)
+
+
+# The real starter, for tests that drive it with a fake subprocess.
+REAL_START_OPENCODE_SERVER = mod.start_opencode_server
