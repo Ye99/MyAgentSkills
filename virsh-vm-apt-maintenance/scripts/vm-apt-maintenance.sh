@@ -103,8 +103,11 @@ resolve_ip() {
     [ -n "$mac" ] || return 1
     net="${NET:-$(vm_network "$vm")}"
     [ -n "$net" ] || return 1
+    # A MAC can hold several leases (an old one not yet expired); the newest
+    # expiry is the address the guest has now. Columns: date time mac proto ip.
     v net-dhcp-leases "$net" 2>/dev/null \
-        | awk -v m="$mac" '$0 ~ m {print $5}' | cut -d/ -f1 | head -1
+        | awk -v m="$mac" '$3 == m && $4 == "ipv4" {print $1 " " $2 "\t" $5}' \
+        | sort -r | head -1 | cut -f2 | cut -d/ -f1
 }
 
 wait_for_ip() {
@@ -153,6 +156,16 @@ summarize() {
 
 # --- per-VM worker ---------------------------------------------------------
 
+# After a failure before any package was touched: a VM this run booted goes back
+# off (unless --no-poweroff), since nothing on it needs inspecting.
+shut_down_if_we_started() {
+    local vm="$1" prior="$2" log="$3"
+    [ "$prior" != "running" ] && [ "$POWEROFF_MODE" != "none" ] || return 0
+    echo "[$vm] nothing was changed - shutting it down again (was: $prior)" | tee -a "$log"
+    v shutdown "$vm" >>"$log" 2>&1
+    wait_for_off "$vm" || echo "WARNING: $vm did not shut down" | tee -a "$log" >&2
+}
+
 # Writes one line to $LOG_DIR/<vm>.status:
 #   vm|prior_state|ip|final_state|chain_rc|upgraded|new|removed|trimmed_fs|reboot_required
 maintain() {
@@ -181,12 +194,14 @@ maintain() {
 
     echo "[$vm] waiting for an IP address" | tee -a "$log"
     ip=$(wait_for_ip "$vm") || {
+        shut_down_if_we_started "$vm" "$prior" "$log"
         echo "$vm|$prior|-|$(v domstate "$vm")|1|-|-|-|-|-" > "$status"
         echo "ERROR: $vm got no DHCP lease within ${BOOT_TIMEOUT}s" | tee -a "$log" >&2
         return 1
     }
     echo "[$vm] ip=$ip - waiting for sshd" | tee -a "$log"
     wait_for_ssh "$ip" || {
+        shut_down_if_we_started "$vm" "$prior" "$log"
         echo "$vm|$prior|$ip|$(v domstate "$vm")|1|-|-|-|-|-" > "$status"
         echo "ERROR: no SSH on $vm ($ip) within ${BOOT_TIMEOUT}s as $SSH_USER" | tee -a "$log" >&2
         return 1
@@ -194,6 +209,7 @@ maintain() {
 
     # Fail fast rather than letting a sudo password prompt hang the run.
     if ! rsh "$ip" 'sudo -n true' >/dev/null 2>&1; then
+        shut_down_if_we_started "$vm" "$prior" "$log"
         echo "$vm|$prior|$ip|$(v domstate "$vm")|1|-|-|-|-|-" > "$status"
         echo "ERROR: $SSH_USER needs a sudo password on $vm ($ip); unattended patching not possible" \
             | tee -a "$log" >&2
@@ -220,13 +236,14 @@ REMOTE
         #   apt autopurge  == apt-get autoremove --purge
         # noninteractive + the dpkg options keep a conffile prompt from hanging the run.
         rsh_script "$ip" >>"$log" 2>&1 <<'REMOTE'
-export DEBIAN_FRONTEND=noninteractive
 # --force-conf* keeps a changed config file from turning into an interactive
 # "keep or replace?" prompt that would stall the whole unattended run.
+# `sudo env VAR=...`: sudoers often refuses to let sudo keep the caller's environment.
 APTOPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-sudo -E apt-get update &&
-sudo -E apt-get $APTOPTS --with-new-pkgs upgrade &&
-sudo -E apt-get $APTOPTS --purge autoremove &&
+APT="sudo env DEBIAN_FRONTEND=noninteractive apt-get"
+$APT update &&
+$APT $APTOPTS --with-new-pkgs upgrade &&
+$APT $APTOPTS --purge autoremove &&
 sudo fstrim -av
 rc=$?
 [ -f /var/run/reboot-required ] && echo REBOOT_REQUIRED

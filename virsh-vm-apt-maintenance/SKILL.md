@@ -48,7 +48,9 @@ successfully".
 By default a VM that was already running when you started is **left running**.
 Someone may be using it, and shutting it down underneath them is the kind of
 surprise that makes an agent untrustworthy. A VM that was shut off gets powered
-back off when its maintenance finishes.
+back off when its maintenance finishes, and also when the run fails before any package
+was touched (no IP, no SSH, no passwordless sudo). A VM whose apt chain failed stays
+up for inspection.
 
 If the user says "and power them all off", pass `--poweroff-all` — but say in the
 summary which already-running VMs you shut down, so it is visible.
@@ -88,6 +90,8 @@ mac=$(virsh -c qemu:///system dumpxml VM | grep -oPm1 "(?<=<mac address=')[^']+"
 virsh -c qemu:///system net-dhcp-leases default | grep "$mac"
 ```
 
+A MAC can still hold an older, unexpired lease; use the row with the latest expiry.
+
 **4. Check sudo before running anything long.** A guest that wants a sudo password
 will hang a non-interactive SSH session until it times out, in the middle of an
 apt run. One cheap probe up front turns that into a clear error:
@@ -106,11 +110,11 @@ Send the script to an explicit `bash -s` rather than passing a command string:
 
 ```bash
 ssh -o BatchMode=yes user@IP bash -s <<'EOF'
-export DEBIAN_FRONTEND=noninteractive
 APTOPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-sudo -E apt-get update &&
-sudo -E apt-get $APTOPTS --with-new-pkgs upgrade &&
-sudo -E apt-get $APTOPTS --purge autoremove &&
+APT="sudo env DEBIAN_FRONTEND=noninteractive apt-get"
+$APT update &&
+$APT $APTOPTS --with-new-pkgs upgrade &&
+$APT $APTOPTS --purge autoremove &&
 sudo fstrim -av
 EOF
 ```
