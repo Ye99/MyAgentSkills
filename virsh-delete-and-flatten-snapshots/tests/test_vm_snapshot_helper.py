@@ -60,30 +60,12 @@ def test_parse_snapshot_list_names_empty() -> None:
     assert MODULE.parse_snapshot_list_names(output) == []
 
 
-def test_parse_active_disk_path() -> None:
-    assert (
-        MODULE.parse_active_disk_path(DOMBLKLIST_OUTPUT)
-        == "/var/lib/libvirt/images/process-photo-vm.2025_2026_03_01DataProcessed"
-    )
-
-
 def test_parse_backing_chain_images() -> None:
     assert MODULE.parse_backing_chain_images(BACKING_CHAIN_OUTPUT) == [
         "/var/lib/libvirt/images/process-photo-vm.2025_2026_03_01DataProcessed",
         "/var/lib/libvirt/images/process-photo-vm.InstalledCodingAgents_beforeProcessing2025_2026Data",
         "/var/lib/libvirt/images/process-photo-vm.qcow2",
     ]
-
-
-def test_split_overlays_and_base() -> None:
-    overlays, base = MODULE.split_overlays_and_base(
-        MODULE.parse_backing_chain_images(BACKING_CHAIN_OUTPUT)
-    )
-    assert overlays == [
-        "/var/lib/libvirt/images/process-photo-vm.2025_2026_03_01DataProcessed",
-        "/var/lib/libvirt/images/process-photo-vm.InstalledCodingAgents_beforeProcessing2025_2026Data",
-    ]
-    assert base == "/var/lib/libvirt/images/process-photo-vm.qcow2"
 
 
 def test_metadata_only_accepts_subset() -> None:
@@ -164,9 +146,10 @@ def test_cleanup_reclaim_space_dry_run_plans_commands(monkeypatch: pytest.Monkey
  snap2  2026-04-02      shutoff
 """
     domblklist_output = """\
- Target   Source
+ Type   Device   Target   Source
 ----------------------------------------------------------
- vda      /var/lib/libvirt/images/vm.snap2
+ file   cdrom    sda      -
+ file   disk     vda      /var/lib/libvirt/images/vm.snap2
 """
     backing_chain_output = """\
 image: /var/lib/libvirt/images/vm.snap2
@@ -200,6 +183,11 @@ file format: qcow2
             return "State: shut off\n"
         if args[:4] == ["virsh", "-c", "qemu:///system", "dumpxml"]:
             return dumpxml_output
+        if args[:4] == ["virsh", "-c", "qemu:///system", "snapshot-dumpxml"]:
+            return (f"<domainsnapshot><disks><disk name='vda' snapshot='external'>"
+                    f"<source file='/var/lib/libvirt/images/vm.{args[5]}'/></disk></disks></domainsnapshot>")
+        if args[:4] == ["virsh", "-c", "qemu:///system", "list"]:
+            return "vm\n"
         if args[:4] == ["sudo", "-n", "qemu-img", "info"]:
             return backing_chain_output
         return ""
@@ -222,16 +210,19 @@ file format: qcow2
     assert commands == [
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
         ["virsh", "-c", "qemu:///system", "dominfo", "vm"],
+        ["virsh", "-c", "qemu:///system", "snapshot-dumpxml", "vm", "snap1"],
+        ["virsh", "-c", "qemu:///system", "snapshot-dumpxml", "vm", "snap2"],
+        ["virsh", "-c", "qemu:///system", "domblklist", "vm", "--details"],
+        ["sudo", "-n", "qemu-img", "info", "--backing-chain", "/var/lib/libvirt/images/vm.snap2"],
+        ["virsh", "-c", "qemu:///system", "list", "--all", "--name"],
         ["virsh", "-c", "qemu:///system", "snapshot-delete", "vm", "--snapshotname", "snap1", "--metadata"],
         ["virsh", "-c", "qemu:///system", "snapshot-delete", "vm", "--snapshotname", "snap2", "--metadata"],
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
-        ["virsh", "-c", "qemu:///system", "domblklist", "vm"],
-        ["sudo", "-n", "qemu-img", "info", "--backing-chain", "/var/lib/libvirt/images/vm.snap2"],
         ["sudo", "-n", "qemu-img", "commit", "-p", "/var/lib/libvirt/images/vm.snap2"],
         ["sudo", "-n", "qemu-img", "commit", "-p", "/var/lib/libvirt/images/vm.snap1"],
         ["virsh", "-c", "qemu:///system", "dumpxml", "vm"],
         ["virsh", "-c", "qemu:///system", "define", "<temp-xml>"],
-        ["virsh", "-c", "qemu:///system", "domblklist", "vm"],
+        ["virsh", "-c", "qemu:///system", "domblklist", "vm", "--details"],
         ["sudo", "-n", "qemu-img", "info", "--backing-chain", "/var/lib/libvirt/images/vm.qcow2"],
         ["sudo", "-n", "rm", "-f", "/var/lib/libvirt/images/vm.snap2", "/var/lib/libvirt/images/vm.snap1"],
         ["sudo", "-n", "test", "-e", "/var/lib/libvirt/images/vm.qcow2"],
@@ -251,6 +242,17 @@ file format: qcow2
             "/var/lib/libvirt/images/vm.snap1",
         ],
         "dry_run": True,
+        "disks": [
+            {
+                "target": "vda",
+                "active_disk": "/var/lib/libvirt/images/vm.snap2",
+                "base_disk": "/var/lib/libvirt/images/vm.qcow2",
+                "overlays": [
+                    "/var/lib/libvirt/images/vm.snap2",
+                    "/var/lib/libvirt/images/vm.snap1",
+                ],
+            }
+        ],
     }
 
 
@@ -264,9 +266,10 @@ def test_cleanup_metadata_only_dry_run_plans_commands(monkeypatch: pytest.Monkey
  snap2  2026-04-02      shutoff
 """
     domblklist_output = """\
- Target   Source
+ Type   Device   Target   Source
 ----------------------------------------------------------
- vda      /var/lib/libvirt/images/vm.snap2
+ file   cdrom    sda      -
+ file   disk     vda      /var/lib/libvirt/images/vm.snap2
 """
 
     def fake_run_command(args: list[str], *, dry_run: bool = False) -> str:
@@ -297,7 +300,7 @@ def test_cleanup_metadata_only_dry_run_plans_commands(monkeypatch: pytest.Monkey
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
         ["virsh", "-c", "qemu:///system", "snapshot-delete", "vm", "--snapshotname", "snap1", "--metadata"],
         ["virsh", "-c", "qemu:///system", "snapshot-list", "vm"],
-        ["virsh", "-c", "qemu:///system", "domblklist", "vm"],
+        ["virsh", "-c", "qemu:///system", "domblklist", "vm", "--details"],
     ]
     payload = json.loads(capsys.readouterr().out)
     assert payload == {

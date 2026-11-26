@@ -20,6 +20,18 @@ class VmDiskChain:
     active_disk: str
     overlays: list[str]
     base_disk: str
+    target: str = ""
+    remaining_chain: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class Disk:
+    target: str
+    path: str
+
+
+# virsh subcommands that only read; they run even in --dry-run so the plan shown is the real one.
+READ_ONLY_VIRSH = {"snapshot-list", "snapshot-dumpxml", "dominfo", "domblklist", "dumpxml", "list"}
 
 
 def resolve_common_args(args: argparse.Namespace) -> tuple[str, bool]:
@@ -40,15 +52,28 @@ def parse_snapshot_list_names(output: str) -> list[str]:
     return names
 
 
-def parse_active_disk_path(output: str) -> str:
+def parse_disks(output: str) -> list[Disk]:
+    """Disk devices with a source file from `virsh domblklist --details` (CD-ROMs and empty drives skipped)."""
+    disks: list[Disk] = []
     for line in output.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("Target") or set(stripped) == {"-"}:
+        if not stripped or stripped.startswith("Type") or set(stripped) == {"-"}:
             continue
-        parts = line.split()
-        if len(parts) >= 2:
-            return parts[-1]
-    raise ValueError("Could not find an active disk path in domblklist output")
+        parts = stripped.split(None, 3)
+        if len(parts) == 4 and parts[1] == "disk" and parts[3] != "-":
+            disks.append(Disk(target=parts[2], path=parts[3]))
+    return disks
+
+
+def parse_snapshot_overlays(xml: str) -> dict[str, str]:
+    """{target: overlay file} for the external overlays a snapshot created (`virsh snapshot-dumpxml`)."""
+    overlays: dict[str, str] = {}
+    root = ET.fromstring(xml)
+    for disk in root.findall("./disks/disk"):
+        source = disk.find("source")
+        if disk.get("snapshot") == "external" and source is not None and source.get("file"):
+            overlays[disk.get("name", "")] = source.get("file")
+    return overlays
 
 
 def parse_backing_chain_images(output: str) -> list[str]:
@@ -66,14 +91,6 @@ def parse_dom_state(output: str) -> str:
         if line.startswith("State:"):
             return line.split(":", 1)[1].strip()
     raise ValueError("Could not determine VM state from dominfo output")
-
-
-def split_overlays_and_base(images: list[str]) -> tuple[list[str], str]:
-    if len(images) < 1:
-        raise ValueError("Expected at least one image in the backing chain")
-    if len(images) == 1:
-        return [], images[0]
-    return images[:-1], images[-1]
 
 
 def validate_mode_selection(
@@ -132,11 +149,11 @@ def run_command(args: list[str], *, dry_run: bool = False) -> str:
 
 
 def virsh(uri: str, *args: str, dry_run: bool = False) -> str:
-    return run_command(["virsh", "-c", uri, *args], dry_run=dry_run)
+    return run_command(["virsh", "-c", uri, *args], dry_run=dry_run and args[0] not in READ_ONLY_VIRSH)
 
 
 def sudo_qemu_img(*args: str, dry_run: bool = False) -> str:
-    return run_command(["sudo", "-n", "qemu-img", *args], dry_run=dry_run)
+    return run_command(["sudo", "-n", "qemu-img", *args], dry_run=dry_run and args[0] != "info")
 
 
 def sudo_rm(paths: Iterable[str], *, dry_run: bool = False) -> str:
@@ -158,27 +175,67 @@ def get_snapshot_names(*, vm: str, uri: str, dry_run: bool = False) -> list[str]
     return parse_snapshot_list_names(output)
 
 
-def get_vm_disk_chain(*, vm: str, uri: str, dry_run: bool = False) -> VmDiskChain:
-    domblklist_output = virsh(uri, "domblklist", vm, dry_run=dry_run)
-    if not domblklist_output.strip():
-        return VmDiskChain(active_disk="<active>", overlays=[], base_disk="<base>")
-    active_disk = parse_active_disk_path(domblklist_output)
-    chain_output = sudo_qemu_img("info", "--backing-chain", active_disk, dry_run=dry_run)
-    if not chain_output.strip():
-        return VmDiskChain(active_disk=active_disk, overlays=[], base_disk="<base>")
-    images = parse_backing_chain_images(chain_output)
-    overlays, base_disk = split_overlays_and_base(images)
-    return VmDiskChain(active_disk=active_disk, overlays=overlays, base_disk=base_disk)
+def get_disks(*, vm: str, uri: str, dry_run: bool = False) -> list[Disk]:
+    return parse_disks(virsh(uri, "domblklist", vm, "--details", dry_run=dry_run))
 
 
-def redefine_vm_disk(*, vm: str, uri: str, old_path: str, new_path: str, dry_run: bool = False) -> None:
+def backing_chain(path: str, *, force_share: bool = False, dry_run: bool = False) -> list[str]:
+    extra = ["-U"] if force_share else []  # another domain may be running and hold the image lock
+    return parse_backing_chain_images(sudo_qemu_img("info", *extra, "--backing-chain", path, dry_run=dry_run))
+
+
+def plan_reclaim(*, vm: str, uri: str, snapshots: list[str], dry_run: bool = False) -> list[VmDiskChain]:
+    """Work out, before anything is changed, which overlays to commit for every disk.
+
+    Only overlays the snapshots created (from snapshot-dumpxml) are committed, from the top of each
+    chain down to the first image no snapshot created, which becomes the disk's new source. For a
+    linked clone that is the VM's own disk, and the shared template below it is never written. Refuses
+    when any image it would write or delete is in another domain's backing chain.
+    """
+    created: set[str] = set()
+    for snapshot in snapshots:
+        created.update(parse_snapshot_overlays(virsh(uri, "snapshot-dumpxml", vm, snapshot, dry_run=dry_run)).values())
+    disks = get_disks(vm=vm, uri=uri, dry_run=dry_run)
+    if not disks:
+        raise ValueError(f"No disk with a source file found for {vm}")
+    plans: list[VmDiskChain] = []
+    for disk in disks:
+        chain = backing_chain(disk.path, dry_run=dry_run)
+        k = 0
+        while k < len(chain) and chain[k] in created:
+            k += 1
+        stray = [image for image in chain[k:] if image in created]
+        if stray:
+            raise ValueError(
+                f"Disk {disk.target}: {chain[k]} sits above snapshot overlay {stray[0]} but no snapshot created it; "
+                "flatten this chain by hand")
+        if k == len(chain):
+            raise ValueError(f"Disk {disk.target}: no base image below the snapshot overlays {chain}")
+        if k:
+            plans.append(VmDiskChain(active_disk=disk.path, overlays=chain[:k], base_disk=chain[k],
+                                     target=disk.target, remaining_chain=tuple(chain[k:])))
+    touched = {image for plan in plans for image in [*plan.overlays, plan.base_disk]}
+    for line in virsh(uri, "list", "--all", "--name", dry_run=dry_run).splitlines():
+        other = line.strip()
+        if not other or other == vm:
+            continue
+        for disk in get_disks(vm=other, uri=uri, dry_run=dry_run):
+            shared = touched & set(backing_chain(disk.path, force_share=True, dry_run=dry_run))
+            if shared:
+                raise ValueError(
+                    f"{sorted(shared)[0]} is in the backing chain of domain {other} ({disk.target}); "
+                    "committing into it or deleting it would corrupt that domain")
+    return plans
+
+
+def redefine_vm_disks(*, vm: str, uri: str, replacements: list[tuple[str, str]], dry_run: bool = False) -> None:
     xml = virsh(uri, "dumpxml", vm, dry_run=dry_run)
+    updated_xml = xml
+    for old_path, new_path in replacements:
+        updated_xml = replace_disk_source_path(xml=updated_xml, old_path=old_path, new_path=new_path)
     if dry_run:
-        if xml.strip():
-            replace_disk_source_path(xml=xml, old_path=old_path, new_path=new_path)
         run_command(["virsh", "-c", uri, "define", "<temp-xml>"], dry_run=True)
         return
-    updated_xml = replace_disk_source_path(xml=xml, old_path=old_path, new_path=new_path)
     with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as handle:
         handle.write(updated_xml)
         temp_path = handle.name
@@ -198,21 +255,21 @@ def emit_summary(
     base_disk: str | None,
     overlays: list[str],
     dry_run: bool,
+    disks: list[dict] | None = None,
 ) -> None:
-    print(
-        json.dumps(
-            {
-                "mode": mode,
-                "vm": vm,
-                "uri": uri,
-                "deleted_snapshots": deleted_snapshots,
-                "active_disk": active_disk,
-                "base_disk": base_disk,
-                "overlays": overlays,
-                "dry_run": dry_run,
-            }
-        )
-    )
+    summary = {
+        "mode": mode,
+        "vm": vm,
+        "uri": uri,
+        "deleted_snapshots": deleted_snapshots,
+        "active_disk": active_disk,
+        "base_disk": base_disk,
+        "overlays": overlays,
+        "dry_run": dry_run,
+    }
+    if disks is not None:
+        summary["disks"] = disks
+    print(json.dumps(summary))
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -236,10 +293,14 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         confirm_all=args.all,
     )
 
+    plans: list[VmDiskChain] = []
     if args.mode == "reclaim-space":
         dominfo_output = virsh(uri, "dominfo", args.vm, dry_run=dry_run)
         if dominfo_output.strip() and parse_dom_state(dominfo_output) != "shut off":
             raise ValueError("VM must be shut off before reclaim-space")
+        # Everything is validated before the first change: the snapshot metadata is needed to know
+        # which overlays the snapshots created, and is gone once deleted.
+        plans = plan_reclaim(vm=args.vm, uri=uri, snapshots=selected, dry_run=dry_run)
 
     for snapshot in selected:
         virsh(uri, "snapshot-delete", args.vm, "--snapshotname", snapshot, "--metadata", dry_run=dry_run)
@@ -247,48 +308,63 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     virsh(uri, "snapshot-list", args.vm, dry_run=dry_run)
 
     if args.mode == "metadata-only":
-        domblklist_output = virsh(uri, "domblklist", args.vm, dry_run=dry_run)
-        active_disk = parse_active_disk_path(domblklist_output) if domblklist_output.strip() else None
+        disks = get_disks(vm=args.vm, uri=uri, dry_run=dry_run)
         emit_summary(
             mode=args.mode,
             vm=args.vm,
             uri=uri,
             deleted_snapshots=selected,
-            active_disk=active_disk,
+            active_disk=disks[0].path if disks else None,
             base_disk=None,
             overlays=[],
             dry_run=dry_run,
         )
         return 0
 
-    chain = get_vm_disk_chain(vm=args.vm, uri=uri, dry_run=dry_run)
-    for overlay in chain.overlays:
-        sudo_qemu_img("commit", "-p", overlay, dry_run=dry_run)
+    for plan in plans:
+        for overlay in plan.overlays:  # top to bottom
+            sudo_qemu_img("commit", "-p", overlay, dry_run=dry_run)
 
-    redefine_vm_disk(
-        vm=args.vm,
-        uri=uri,
-        old_path=chain.active_disk,
-        new_path=chain.base_disk,
-        dry_run=dry_run,
-    )
+    if plans:
+        redefine_vm_disks(
+            vm=args.vm,
+            uri=uri,
+            replacements=[(plan.active_disk, plan.base_disk) for plan in plans],
+            dry_run=dry_run,
+        )
 
-    virsh(uri, "domblklist", args.vm, dry_run=dry_run)
-    sudo_qemu_img("info", "--backing-chain", chain.base_disk, dry_run=dry_run)
+    # Verify before deleting anything: each disk now points at its new base, and that base's chain is
+    # exactly what was below the overlays (no backing file for a plain VM, only the template for a
+    # linked clone), so no overlay about to be deleted is still in use.
+    sources = {disk.target: disk.path for disk in get_disks(vm=args.vm, uri=uri, dry_run=dry_run)}
+    for plan in plans:
+        chain = backing_chain(plan.base_disk, dry_run=dry_run)
+        if dry_run:
+            continue
+        if sources.get(plan.target) != plan.base_disk:
+            raise ValueError(f"Disk {plan.target} points at {sources.get(plan.target)}, not {plan.base_disk}; "
+                             "overlays kept")
+        if tuple(chain) != plan.remaining_chain:
+            raise ValueError(f"Unexpected backing chain for {plan.base_disk}: {chain}; overlays kept")
 
-    sudo_rm(chain.overlays, dry_run=dry_run)
-    sudo_test_exists(chain.base_disk, dry_run=dry_run)
-    for overlay in chain.overlays:
+    overlays = [overlay for plan in plans for overlay in plan.overlays]
+    if overlays:
+        sudo_rm(overlays, dry_run=dry_run)
+    for plan in plans:
+        sudo_test_exists(plan.base_disk, dry_run=dry_run)
+    for overlay in overlays:
         sudo_test_missing(overlay, dry_run=dry_run)
     emit_summary(
         mode=args.mode,
         vm=args.vm,
         uri=uri,
         deleted_snapshots=selected,
-        active_disk=chain.active_disk,
-        base_disk=chain.base_disk,
-        overlays=chain.overlays,
+        active_disk=plans[0].active_disk if plans else None,
+        base_disk=plans[0].base_disk if plans else None,
+        overlays=overlays,
         dry_run=dry_run,
+        disks=[{"target": p.target, "active_disk": p.active_disk, "base_disk": p.base_disk,
+                "overlays": p.overlays} for p in plans],
     )
     return 0
 
