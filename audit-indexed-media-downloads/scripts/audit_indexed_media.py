@@ -292,7 +292,26 @@ def parse_media_projection(path: Path, digest: str, siblings: set[str]) -> Media
     )
 
 
-def apply_changes(actions: list[Action]) -> None:
+def apply_changes(actions: list[Action], digests: dict[Path, str] | None = None) -> None:
+    """Delete hash-proven duplicates, then rename. Every check runs before the first change.
+
+    digests holds each file's SHA-256 from the inventory. A duplicate or its keeper whose
+    content changed since then is refused, since the plan was made from the old content.
+    """
+    deleting = {action.source for action in actions if action.kind == "delete"}
+    for action in actions:
+        if action.kind == "rename" and action.target is not None:
+            if action.target.exists() and action.target not in deleting:
+                raise FileExistsError(f"refusing to overwrite {action.target}")
+    if digests is not None:
+        for action in actions:
+            if action.kind != "delete":
+                continue
+            for path in (action.source, action.keeper):
+                if path is None or path not in digests:
+                    continue
+                if sha256(path) != digests[path]:
+                    raise OSError(f"{path.name} changed since the inventory; rerun the audit")
     for action in actions:
         if action.kind == "delete":
             action.source.unlink()
@@ -502,7 +521,7 @@ def main() -> int:
 
     if args.apply:
         try:
-            apply_changes(actions)
+            apply_changes(actions, {item.path: item.digest for item in files})
         except OSError as error:
             print(f"ERROR: apply failed: {error}", file=sys.stderr)
             return 2
