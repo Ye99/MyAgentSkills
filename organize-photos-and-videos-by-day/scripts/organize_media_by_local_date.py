@@ -600,6 +600,20 @@ def _load_find_missing_module(repo_root: Path):
     return module
 
 
+class VerificationUnavailable(RuntimeError):
+    """The content check could not run, so a copy cannot be called complete."""
+
+
+# A source is accounted for when it was copied or an identical file already
+# sits at its destination.
+ACCOUNTED_STATUSES = {"copied", "skipped-already-exists"}
+
+
+def unaccounted_sources(media_sources: list[Path], copied: list[dict[str, Any]]) -> list[str]:
+    done = {entry["source_path"] for entry in copied if entry.get("status") in ACCOUNTED_STATUSES}
+    return [str(path) for path in media_sources if str(path) not in done]
+
+
 def verify_with_find_missing(
     media_source_paths: list[Path],
     destination_root: Path,
@@ -610,7 +624,9 @@ def verify_with_find_missing(
     repo_root = Path(__file__).resolve().parents[2]
     module = _load_find_missing_module(repo_root)
     if module is None:
-        return []
+        raise VerificationUnavailable(
+            "find-missing-files is not next to this skill, so copied files cannot be checked by content"
+        )
 
     if phase_callback is not None:
         phase_callback("verification started")
@@ -919,20 +935,22 @@ def main() -> int:
     print(file=sys.stderr)  # newline after progress line
 
     missed_media: list[str] = []
+    verification_error = ""
 
     if args.apply:
-        copied_sources = {entry["source_path"] for entry in copied if entry["status"] == "copied"}
-        for source_path in media_sources:
-            if str(source_path) not in copied_sources:
-                missed_media.append(str(source_path))
+        missed_media.extend(unaccounted_sources(media_sources, copied))
 
-        missing_by_hash = verify_with_find_missing(
-            media_source_paths=media_sources,
-            destination_root=destination_root,
-            workers=max(1, args.workers),
-            verbose=args.verbose,
-            phase_callback=_emit_phase,
-        )
+        try:
+            missing_by_hash = verify_with_find_missing(
+                media_source_paths=media_sources,
+                destination_root=destination_root,
+                workers=max(1, args.workers),
+                verbose=args.verbose,
+                phase_callback=_emit_phase,
+            )
+        except VerificationUnavailable as exc:
+            verification_error = str(exc)
+            missing_by_hash = []
         for source_path in missing_by_hash:
             if source_path not in missed_media:
                 missed_media.append(source_path)
@@ -971,6 +989,10 @@ def main() -> int:
     print(f"Unknown signatures still needing AI lookup: {len(unknown_signatures)}")
     _emit_done(report_path)
 
+    if verification_error:
+        print(f"Verification could not run: {verification_error}. Do not delete the source "
+              "until the copy is checked.", file=sys.stderr)
+        return 1
     if args.apply and missed_media:
         print("Verification failed: missed media detected. See report for details.", file=sys.stderr)
         return 1
