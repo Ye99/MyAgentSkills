@@ -1712,6 +1712,8 @@ def build_target_folder_name(date_prefix: str, landmarks: list[str]) -> str:
 # Module-level lock to serialize find_available_target + rename in tree mode,
 # preventing TOCTOU races when multiple folders produce the same target name.
 _RENAME_LOCK = threading.Lock()
+# Set on Ctrl-C: folders still running finish their inference but rename nothing.
+_STOP_REQUESTED = threading.Event()
 
 
 def _validate_target_within_parent(parent: Path, target: Path) -> None:
@@ -1864,7 +1866,11 @@ def process_folder_tree(
             opencode_model=opencode_model,
         )
 
+    _STOP_REQUESTED.clear()
+
     def run_folder(index: int, folder: Path) -> tuple[int, dict[str, Any]]:
+        if _STOP_REQUESTED.is_set():
+            return index, {"folder_path": str(folder), "status": "skipped-cancelled"}
         try:
             result = rename_folder_from_itinerary(
                 folder=folder,
@@ -1917,7 +1923,10 @@ def process_folder_tree(
     try:
         if inference_scheduler is not None and len(day_folders) > 1:
             max_folder_workers = min(len(day_folders), max(4, inference_workers * 3))
-            with ThreadPoolExecutor(max_workers=max_folder_workers) as executor:
+            # Not a with-block: leaving one waits for every running folder,
+            # which made Ctrl-C hang until all inferences finished.
+            executor = ThreadPoolExecutor(max_workers=max_folder_workers)
+            try:
                 future_map = {
                     executor.submit(run_folder, idx, folder): idx
                     for idx, folder in enumerate(day_folders)
@@ -1926,6 +1935,11 @@ def process_folder_tree(
                     idx, result = future.result()
                     folder_results[idx] = result
                     progress.folder_done(result)
+            except BaseException:
+                _STOP_REQUESTED.set()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            executor.shutdown(wait=True)
         else:
             for idx, folder in enumerate(day_folders):
                 _idx, result = run_folder(idx, folder)
@@ -1933,6 +1947,7 @@ def process_folder_tree(
                 progress.folder_done(result)
     except KeyboardInterrupt:
         cancelled = True
+        _STOP_REQUESTED.set()
         raise
     finally:
         if inference_scheduler is not None:
@@ -2410,6 +2425,8 @@ def rename_folder_from_itinerary(
         # then one rename silently overwrites the other on Linux.
         with _RENAME_LOCK:
             target_path = find_available_target(folder, target_name)
+            if _STOP_REQUESTED.is_set():
+                target_path = folder
             if target_path != folder:
                 try:
                     folder.rename(target_path)
