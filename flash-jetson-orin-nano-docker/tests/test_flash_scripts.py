@@ -72,6 +72,7 @@ def nfs(tools, tmp_path):
     (units / "rpc-statd").write_text("masked")
     _stub(bin_, "id", 'echo 0')
     _stub(bin_, "sysctl", 'echo 0')
+    _stub(bin_, "chown", rec)  # the tests run as an ordinary user; never chown for real
     _stub(bin_, "exportfs", rec)
     _stub(bin_, "showmount", 'echo "Export list"; grep -v "^#" "$JETSON_NFS_EXPORTS" | cut -d" " -f1')
     _stub(bin_, "nmcli", rec)

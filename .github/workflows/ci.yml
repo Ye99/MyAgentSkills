@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System tools the tests drive
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+            zsh rsync zstd jdupes libimage-exiftool-perl
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy pillow pypdf reportlab pdfplumber opencv-python-headless
+      - name: Run every skill's tests
+        run: .github/scripts/run-tests.sh
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ruff (pyflakes and bugbear, see ruff.toml)
+        run: |
+          python -m pip install ruff
+          ruff check --output-format github .
+      - name: shellcheck (bash scripts; the two zsh scripts are not supported by shellcheck)
+        run: |
+          git ls-files '*.sh' | xargs grep -L '^#!.*zsh' | xargs shellcheck -S warning
