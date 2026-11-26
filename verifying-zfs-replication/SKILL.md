@@ -23,9 +23,9 @@ nohup bash scripts/verify.sh <src-host> <src-dataset> <dst-host> <dst-dataset> <
 - `<from-snap>`: the newest snapshot both sides had **before** this transfer; `<to-snap>`: the one just received. To verify a full (non-incremental) send, verify the oldest snapshot with a full-tree manifest instead (see below).
 - Needs passwordless ssh and `sudo -n` on both hosts, `python3` on both. `THREADS` (default 4) files are hashed at a time per host.
 - Run it only when **no replication, scrub or other heavy I/O** is running on either pool: it reads all the changed data on both hosts and takes as long as the slower pool needs.
-- Result: `PASS`, or `FAIL` with one line per problem (`DIFF sha256 <path>`, `DELETED BUT PRESENT <path>`, ...). Work files stay in `~/zfs-verify-<to-snap>/` on both hosts; delete them after reading the result.
+- Result: `PASS`, or `FAIL` with one line per problem (`DIFF sha256 <path>`, `DELETED BUT PRESENT <path>`, ...). Work files stay in `~/zfs-verify-<to-snap>-<hash>/` on both hosts (the hash covers all six arguments and the snapshots' createtxg, so another dataset with the same snapshot names, or a re-received target, gets its own dir); delete them after reading the result.
 
-The hashing runs detached on each host. If the session running `verify.sh` dies, rerun the same command: finished or running jobs are not restarted, it just resumes polling.
+The hashing runs detached on each host. If the session running `verify.sh` dies, rerun the same command: finished or running jobs are not restarted, it just resumes polling. Add `--fresh` as the first argument to discard this run's work dir on both hosts and recompute.
 
 ## Quick reference
 
@@ -41,7 +41,7 @@ The hashing runs detached on each host. If the session running `verify.sh` dies,
 For the whole dataset rather than the change set, build the list from the source snapshot itself and run steps 3–4 by hand:
 
 ```bash
-cd <src-mount>/.zfs/snapshot/<to-snap> && sudo find . -mindepth 1 -printf '%P\0' > ~/zfs-verify-<to-snap>/present.nul
+cd <src-mount>/.zfs/snapshot/<to-snap> && sudo find . -mindepth 1 -printf '%P\0' > ~/zfs-verify-<to-snap>-<hash>/present.nul
 ```
 
 Then copy it to the target with an empty `deleted.nul`. This reads the entire dataset on both hosts.
