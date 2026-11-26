@@ -24,7 +24,7 @@ Scripts live in `scripts/`; run host-side ones with `ssh <host> 'bash -s' < scri
      'systemd-inhibit --what=sleep:idle:shutdown --why=dist-upgrade do-release-upgrade -f DistUpgradeViewText; exec bash'
    ```
    Desktop: never launch from a GUI terminal — the display manager restart kills it. Reattach from a TTY with `sudo tmux attach -t upgrade`.
-4. **Watch** from the workstation: `bash scripts/watch.sh <host>` (run in background). It exits when the pane sits on a prompt or the upgrader exits. Answer with `sudo tmux send-keys -t upgrade <answer> Enter`.
+4. **Watch** from the workstation: `bash scripts/watch.sh <host>` (run in background). It exits when the pane sits on a prompt (a question, a yes/no or conffile choice, a dialog button; never a progress line with a percentage or an apt Get:/Unpacking/Setting up line) or the upgrader exits. Answer with `sudo tmux send-keys -t upgrade <answer> Enter`.
 5. **Answer prompts** with the table below.
 6. **Pre-reboot gate:** `ssh <host> 'MODE=pre bash -s' < scripts/postcheck.sh`. Reboot only when every line passes; a remote-only machine with no console must pass the network and SSH lines.
 7. **Reboot** by answering `y` at `Restart required`; wait for SSH; run `postcheck.sh` (default mode is post).
