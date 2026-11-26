@@ -26,6 +26,8 @@ Content is moved, never reworded. The only edits to original lines are:
   2. link targets: heading links whose heading moved to a different note get that note's name as target
      (same-note [[#H]], [[Source#H]], markdown (#h) / (Source.md#H)), inside the split notes and in other vault notes.
 Added lines: YAML frontmatter, an H1 title and a one-line description quote per note, and the index note.
+The source's own YAML frontmatter (tags, aliases) is not split: it opens the index note unchanged, so segments
+start after it. Files keep their CRLF or LF line endings, and report.json hashes the raw bytes.
 Trailing blank lines at the end of a topic note are dropped.
 
 Verification (exit 1 on any failure):
@@ -57,20 +59,38 @@ def read_lines(p):
     return text, lines
 
 
+def raw_sha256(p):
+    """Hash of the bytes on disk, as the writer checks them (not the newline-normalised text)."""
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def uses_crlf(p):
+    return b"\r\n" in p.read_bytes()
+
+
+def write_text(p, text, crlf):
+    """Write with the line endings of the file the text came from."""
+    with open(p, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as f:
+        f.write(text)
+
+
+def frontmatter_end(lines):
+    """Number of lines of YAML frontmatter at the top (0 if none)."""
+    if lines and lines[0].rstrip() == "---":
+        for k in range(1, len(lines)):
+            if lines[k].rstrip() in ("---", "..."):
+                return k + 1
+    return 0
+
+
 def fence_flags(lines):
     """True for each line that headings and links must not touch: YAML frontmatter at the top
     of the file and fenced code blocks, fence lines included.
 
     Fences follow CommonMark: an opener is 3+ backticks or tildes indented at most 3 spaces;
     only a run of the same character, at least as long, with nothing after it, closes it."""
-    out = [False] * len(lines)
-    start = 0
-    if lines and lines[0].rstrip() == "---":
-        for k in range(1, len(lines)):
-            if lines[k].rstrip() in ("---", "..."):
-                out[:k + 1] = [True] * (k + 1)
-                start = k + 1
-                break
+    start = frontmatter_end(lines)
+    out = [True] * start + [False] * (len(lines) - start)
     fence = None
     for k in range(start, len(lines)):
         l = lines[k]
@@ -114,7 +134,9 @@ def main():
     fenced = fence_flags(lines)
     notes = plan["notes"]
     date = plan.get("date", "")
-    read_hashes = {str(src_rel): hashlib.sha256(src_text.encode()).hexdigest()}
+    read_hashes = {str(src_rel): raw_sha256(src_path)}
+    src_crlf = uses_crlf(src_path)
+    fm_end = frontmatter_end(lines)   # source frontmatter stays with the index note
 
     # ---- plan sanity -------------------------------------------------------------------------
     names = [n["name"] for n in notes]
@@ -131,11 +153,16 @@ def main():
 
     # ---- A. coverage ---------------------------------------------------------------------------
     owner, shift_of = [None] * (N + 1), [0] * (N + 1)
+    for i in range(1, fm_end + 1):
+        owner[i] = stem
     for n in notes:
         for seg in n["segments"]:
             first, last, shift = seg
             if not (1 <= first <= last <= N):
                 err(f"{n['name']}: segment {seg} outside 1..{N}"); continue
+            if first <= fm_end:
+                err(f"{n['name']}: segment {seg} covers the source frontmatter (lines 1-{fm_end}), "
+                    f"which stays with the index note; start segments at line {fm_end + 1}"); continue
             for i in range(first, last + 1):
                 if owner[i] is not None:
                     err(f"line {i} assigned to both {owner[i]!r} and {n['name']!r}")
@@ -248,7 +275,7 @@ def main():
                 body.append(l); idx.append((i, shift, reps))
         while body and body[-1].strip() == "":
             body.pop(); idx.pop()
-        (notes_dir / f"{name}.md").write_text("\n".join(header + body) + "\n", encoding="utf-8")
+        write_text(notes_dir / f"{name}.md", "\n".join(header + body) + "\n", src_crlf)
         mapping[name] = (len(header), idx)
 
     # ---- index note ------------------------------------------------------------------------------
@@ -257,7 +284,7 @@ def main():
     intro = icfg.get("intro") or (
         f"Index of the notes split by topic from `{src_rel.name}` on {date}. Related sections that were scattered "
         f"in the original are grouped together. Each entry lists the note's main sections.")
-    ix = [f"# {stem}", "", intro, ""]
+    ix = lines[:fm_end] + [f"# {stem}", "", intro, ""]
     for n in notes:
         name = n["name"]
         text = (notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")
@@ -282,7 +309,7 @@ def main():
             else:
                 ix.append(f"{indent}- [[{name}#{t}|{display(t)}]]")
         ix.append("")
-    (notes_dir / f"{stem}.md").write_text("\n".join(ix).rstrip("\n") + "\n", encoding="utf-8")
+    write_text(notes_dir / f"{stem}.md", "\n".join(ix).rstrip("\n") + "\n", src_crlf)
 
     # ---- rewrite inbound heading links in other vault notes ----------------------------------------
     rewrites = {}
@@ -309,9 +336,9 @@ def main():
         if changed:
             dst = out / "rewrites" / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text("\n".join(new_lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+            write_text(dst, "\n".join(new_lines) + ("\n" if text.endswith("\n") else ""), uses_crlf(p))
             rewrites[rel.as_posix()] = per_line
-            read_hashes[rel.as_posix()] = hashlib.sha256(text.encode()).hexdigest()
+            read_hashes[rel.as_posix()] = raw_sha256(p)
 
     # ---- B. undo check (from disk) -----------------------------------------------------------------
     def undo(l, reps):
@@ -322,6 +349,11 @@ def main():
             l = l[:k] + old + l[k + len(new):]
         return l
     seen = collections.Counter()
+    index_fm = (notes_dir / f"{stem}.md").read_text(encoding="utf-8").split("\n")[:fm_end]
+    if index_fm != lines[:fm_end]:
+        err("index note does not start with the source frontmatter unchanged")
+    for i in range(1, fm_end + 1):
+        seen[i] += 1
     for name, (hdr, idx) in mapping.items():
         got = (notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")[:-1]
         body = got[hdr:]
@@ -361,7 +393,7 @@ def main():
                 res.append(l)
         return collections.Counter(res)
     before = norm_lines(lines, fenced)
-    after = collections.Counter()
+    after = norm_lines(index_fm, [True] * fm_end)
     for name, (hdr, idx) in mapping.items():
         # each body line keeps the code/frontmatter status of the source line it came from
         after += norm_lines((notes_dir / f"{name}.md").read_text(encoding="utf-8").split("\n")[:-1][hdr:],

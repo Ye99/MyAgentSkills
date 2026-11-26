@@ -48,27 +48,55 @@ SOURCE = "\n".join([
 ]) + "\n"
 
 
-def test_split_keeps_code_and_frontmatter_verbatim(tmp_path):
+def _split(tmp_path, source_bytes, segments):
     vault = tmp_path / "vault"
-    vault.mkdir()
-    (vault / "Big Note.md").write_text(SOURCE, encoding="utf-8")
-    lines = SOURCE.split("\n")
-    beta = lines.index("## Beta") + 1
-    n = len(lines) - 1
+    vault.mkdir(exist_ok=True)
+    (vault / "Big Note.md").write_bytes(source_bytes)
     plan = {"source": "Big Note.md", "date": "2026-01-01", "notes": [
-        {"name": "Big Note Alpha", "description": "Alpha.", "tags": [], "segments": [[1, beta - 1, 1]]},
-        {"name": "Big Note Beta", "description": "Beta.", "tags": [], "segments": [[beta, n, 0]]},
-    ]}
+        {"name": f"Big Note {k}", "description": f"{k}.", "tags": [], "segments": segs}
+        for k, segs in segments.items()]}
     p = tmp_path / "plan.json"
     p.write_text(json.dumps(plan), encoding="utf-8")
     out = tmp_path / "out"
     r = subprocess.run([sys.executable, str(SCRIPT), "--vault", str(vault), "--plan", str(p), "--out", str(out)],
                        capture_output=True, text=True)
+    return r, out
+
+
+LINES = SOURCE.split("\n")
+BETA = LINES.index("## Beta") + 1
+LAST = len(LINES) - 1
+FM_END = 4
+
+
+def test_split_keeps_code_verbatim_and_frontmatter_stays_with_the_index(tmp_path):
+    r, out = _split(tmp_path, SOURCE.encode(), {"Alpha": [[FM_END + 1, BETA - 1, 1]], "Beta": [[BETA, LAST, 0]]})
     assert r.returncode == 0, r.stdout + r.stderr
     alpha = (out / "notes" / "Big Note Alpha.md").read_text(encoding="utf-8")
-    assert "\n# yaml comment\n" in alpha
     assert "\n## still code\n" in alpha
     assert "\n## Alpha\n" in alpha
+    assert "yaml comment" not in alpha
     index = (out / "notes" / "Big Note.md").read_text(encoding="utf-8")
+    # the source's tags and aliases survive: its frontmatter opens the index note, unchanged
+    assert index.startswith("---\ntags: [x]\n# yaml comment\n---\n# Big Note\n")
     assert "[[Big Note Beta#Beta|Beta]]" in index
 
+
+def test_a_segment_over_the_source_frontmatter_is_refused(tmp_path):
+    r, out = _split(tmp_path, SOURCE.encode(), {"Alpha": [[1, BETA - 1, 1]], "Beta": [[BETA, LAST, 0]]})
+    assert r.returncode != 0
+    assert "frontmatter" in r.stdout
+    assert not (out / "notes").exists()
+
+
+def test_crlf_source_keeps_crlf_and_records_the_raw_hash(tmp_path):
+    import hashlib
+    raw = SOURCE.replace("\n", "\r\n").encode()
+    r, out = _split(tmp_path, raw, {"Alpha": [[FM_END + 1, BETA - 1, 1]], "Beta": [[BETA, LAST, 0]]})
+    assert r.returncode == 0, r.stdout + r.stderr
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    # the writer compares raw bytes, so the splitter must record the raw bytes' hash
+    assert report["read_sha256"]["Big Note.md"] == hashlib.sha256(raw).hexdigest()
+    for name in ("Big Note Alpha.md", "Big Note Beta.md", "Big Note.md"):
+        data = (out / "notes" / name).read_bytes()
+        assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), name
