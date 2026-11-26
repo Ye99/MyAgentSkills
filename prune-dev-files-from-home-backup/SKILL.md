@@ -15,7 +15,7 @@ Shrink a home-folder copy to what the person made. Anything that can be download
 
 1. **Survey.** Run `du -sh HOME/.[!.]* HOME/* | sort -h`, then drill into everything over about 50 MB, including `.config`, `.local/share`, `snap`, `Downloads` and the Trash. Look inside a folder before you classify it.
 2. **Save rebuild manifests:** `bash scripts/save_env_manifests.sh HOME HOME/RebuildManifests`. An environment can only be rebuilt if its package list survives.
-3. **Rescue git work.** For every `.git` under HOME (Trash and Downloads included), run `bash scripts/rescue_git_work.sh HOME REPO`. It saves unpushed commits, stashes, uncommitted edits and untracked source files to `HOME/RescuedGitWork/` as patches plus file copies, with restore steps in a `README.txt`. Untracked build output is skipped. Its first line, `owner: person|third-party|unknown`, feeds the repo rows of the table.
+3. **Rescue git work.** For every `.git` under HOME (Trash and Downloads included), run `bash scripts/rescue_git_work.sh HOME REPO`. It saves unpushed commits (from every branch, tag and a detached HEAD, as a git bundle that keeps merges plus readable patches), stashes, uncommitted edits, and untracked or ignored source files such as `.env` to `HOME/RescuedGitWork/`, with restore steps in a `README.txt`. Build output is skipped, ignored or not. Its first line, `owner: person|third-party|unknown`, feeds the repo rows of the table.
 4. **Show the plan if the user can answer.** Give one list grouped by the table rows below, with sizes, and get a single go-ahead. If the user is away, apply the table as written.
 5. **Delete**, then remove empty folders without entering `.git`: `find HOME -name .git -prune -o -type d -empty -print -delete`.
 6. **Verify.** Measure the "before" size in step 1. Re-list the paths you classified as Keep in step 1 and confirm each one still exists. Check that every rescued repo's `README.txt` is present. Test each remaining archive with `unzip -t` or `tar -tf`. Report the apparent size before and after, using `du -sb`.
@@ -45,7 +45,7 @@ Shrink a home-folder copy to what the person made. Anything that can be download
 | Excuse | Reality |
 |---|---|
 | "gradle-wrapper.jar is tracked in the repo" | Being tracked doesn't make it source. `gradle wrapper` rebuilds it from the `.properties` file. |
-| "The repo has unpushed work, so `.git` stays" | That's what step 3 is for. The patches keep the work; `.git` is only the container. |
+| "The repo has unpushed work, so `.git` stays" | That's what step 3 is for. The bundle and patches keep the work; `.git` is only the container. |
 | "Any clone can go once it's rescued, including the main project" | Only extra copies and third-party clones go whole. For the person's own project, keep the tree so the archive opens as a folder; `.git` is the only part that goes. |
 | "This Trash copy has an edit found nowhere else" | Rescue it, then delete the copy. The Trash's own user files stay. |
 | "The YouTube video might be taken down" or "Site storage might hold web-app projects" | Public downloads and browser storage can be regenerated. The person can export anything they want from the web app. |
