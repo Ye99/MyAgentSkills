@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -89,12 +90,25 @@ def should_exclude(
     return False
 
 
+def sha256_file(filepath: str) -> str:
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def is_inside(path: str, parent: str) -> bool:
+    path, parent = os.path.realpath(path), os.path.realpath(parent)
+    return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
 def build_args():
     parser = argparse.ArgumentParser(
         description="Copy files from SOURCE to DEST, skipping jdupes-detected duplicates."
     )
     parser.add_argument("source", help="Source directory")
-    parser.add_argument("destination", help="Destination directory")
+    parser.add_argument("destination", help="Destination directory (must be empty unless --resume)")
     parser.add_argument(
         "--jdupes-output",
         required=True,
@@ -122,6 +136,12 @@ def build_args():
         action="store_true",
         help="Print what would be copied without actually copying",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue into a non-empty DEST left by an interrupted run: files already there must be "
+             "identical to the source; a different file is reported, never overwritten",
+    )
     return parser.parse_args()
 
 
@@ -134,46 +154,21 @@ def main():
         e if e.startswith(".") else f".{e}" for e in args.exclude_ext
     }
 
+    if is_inside(destination, source):
+        sys.exit(f"refusing: DEST {destination} is inside SOURCE {source}")
+    if is_inside(source, destination):
+        sys.exit(f"refusing: SOURCE {source} is inside DEST {destination}")
+    if os.path.isdir(destination) and os.listdir(destination) and not args.resume:
+        sys.exit(f"refusing: DEST {destination} is not empty; pass --resume to continue an interrupted run")
+
     print("=== Dedup and Copy ===")
     print(f"Source:      {source}")
     print(f"Destination: {destination}")
     if args.dry_run:
         print("*** DRY RUN -- no files will be copied ***")
 
-    # --- Step 1: parse jdupes output ---
-    print("\n[1/5] Parsing jdupes output...")
-    duplicate_sets = parse_jdupes_output(args.jdupes_output)
-    print(f"  Found {len(duplicate_sets)} duplicate sets")
-
-    # --- Step 2: score and select keepers ---
-    print("\n[2/5] Scoring filenames and selecting keepers...")
-    skip_set: set[str] = set()
-    log_sets = []
-
-    for i, dset in enumerate(duplicate_sets):
-        scored = [(score_filepath(f, source), f) for f in dset]
-        scored.sort(key=lambda x: (x[0], x[1]))
-
-        keeper = scored[0][1]
-        for _, s in scored[1:]:
-            skip_set.add(s)
-
-        log_sets.append(
-            {
-                "set_id": i + 1,
-                "kept": os.path.relpath(keeper, source),
-                "kept_score": scored[0][0],
-                "skipped": [
-                    {"path": os.path.relpath(s, source), "score": sc}
-                    for sc, s in scored[1:]
-                ],
-            }
-        )
-
-    print(f"  Files to skip as duplicates: {len(skip_set)}")
-
-    # --- Step 3: build full file list ---
-    print("\n[3/5] Building full file list...")
+    # --- Step 1: build full file list ---
+    print("\n[1/5] Building full file list...")
     all_files = []
     excluded_files = []
     for root, _dirs, files in os.walk(source):
@@ -183,10 +178,50 @@ def main():
                 excluded_files.append(fpath)
             else:
                 all_files.append(fpath)
-
-    copy_list = [f for f in all_files if f not in skip_set]
+    eligible = set(all_files)
     print(f"  Total files:                 {len(all_files)}")
     print(f"  Excluded (ext/name filters): {len(excluded_files)}")
+
+    # --- Step 2: parse jdupes output ---
+    print("\n[2/5] Parsing jdupes output...")
+    duplicate_sets = parse_jdupes_output(args.jdupes_output)
+    print(f"  Found {len(duplicate_sets)} duplicate sets")
+
+    # --- Step 3: score, select keepers, and re-check every skip against its keeper ---
+    # jdupes ran earlier: a file edited since then is no longer a duplicate and must be copied.
+    print("\n[3/5] Selecting keepers and re-hashing duplicates...")
+    skip_set: set[str] = set()
+    log_sets = []
+    changed_since_jdupes = []
+    for dset in duplicate_sets:
+        members = [m for m in (os.path.abspath(f) for f in dset) if m in eligible]
+        if len(members) < 2:
+            continue
+        scored = sorted((score_filepath(f, source), f) for f in members)
+        keeper = scored[0][1]
+        keeper_hash = sha256_file(keeper)
+        skipped = []
+        for sc, f in scored[1:]:
+            if sha256_file(f) == keeper_hash:
+                skip_set.add(f)
+                skipped.append({"path": os.path.relpath(f, source), "score": sc})
+            else:
+                changed_since_jdupes.append(os.path.relpath(f, source))
+        if skipped:
+            log_sets.append(
+                {
+                    "set_id": len(log_sets) + 1,
+                    "kept": os.path.relpath(keeper, source),
+                    "kept_score": scored[0][0],
+                    "kept_sha256": keeper_hash,
+                    "skipped": skipped,
+                }
+            )
+    for rel in changed_since_jdupes:
+        print(f"  no longer a duplicate, will be copied: {rel}")
+    print(f"  Files to skip as duplicates: {len(skip_set)}")
+
+    copy_list = [f for f in all_files if f not in skip_set]
     print(f"  Files to copy:               {len(copy_list)}")
 
     # --- Step 4: copy ---
@@ -204,8 +239,15 @@ def main():
             continue
 
         try:
+            if os.path.lexists(dest):
+                if not os.path.islink(dest) and os.path.isfile(dest) and sha256_file(dest) == sha256_file(fpath):
+                    copied_count += 1  # finished on an earlier, interrupted run
+                    continue
+                raise FileExistsError("a different file is already at the destination; not overwritten")
             os.makedirs(dest_dir, exist_ok=True)
-            shutil.copy2(fpath, dest)
+            part = os.path.join(dest_dir, f".{os.path.basename(dest)}.dedup-copy-part")
+            shutil.copy2(fpath, part)
+            os.replace(part, dest)
             copied_count += 1
             if copied_count % 500 == 0:
                 print(f"  Copied {copied_count}/{len(copy_list)}...")
@@ -222,12 +264,13 @@ def main():
         "summary": {
             "total_source_files_scanned": len(all_files),
             "excluded_files_count": len(excluded_files),
-            "duplicate_sets_found": len(duplicate_sets),
+            "duplicate_sets_found": len(log_sets),
             "files_skipped_as_duplicates": len(skip_set),
             "files_copied": copied_count,
             "copy_errors": len(errors),
             "expected_target_files": len(copy_list),
         },
+        "no_longer_duplicates": changed_since_jdupes,
         "excluded_files": [os.path.relpath(f, source) for f in excluded_files],
         "copy_errors": errors,
     }
@@ -235,13 +278,15 @@ def main():
     with open(args.log, "w", encoding="utf-8") as f:
         json.dump(log_data, f, indent=2, ensure_ascii=False)
 
-    print(f"\n=== Summary ===")
+    print("\n=== Summary ===")
     print(f"  Source files (after exclusions): {len(all_files)}")
-    print(f"  Duplicate sets found:            {len(duplicate_sets)}")
+    print(f"  Duplicate sets found:            {len(log_sets)}")
     print(f"  Files skipped (duplicates):      {len(skip_set)}")
     print(f"  Files copied to target:          {copied_count}")
     print(f"  Copy errors:                     {len(errors)}")
     print(f"  Log written to:                  {args.log}")
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

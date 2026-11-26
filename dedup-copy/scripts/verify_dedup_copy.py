@@ -6,18 +6,18 @@ Performs five checks:
   1. Arithmetic consistency (scanned - skipped == copied, matches actual count)
   2. Every source file is accounted for (in target OR in a skip list)
   3. Every "kept" file from each duplicate set exists in the target
-  4. SHA-256 spot-check of random target files against source originals
+  4. SHA-256 of every target file against its source, and of every skipped
+     duplicate against its keeper (a skip is only safe while the bytes match)
   5. No extra files in the target that don't originate from the source
 
 Usage:
-    python verify_dedup_copy.py SOURCE DEST --log dedup_log.json [--spot-check 10]
+    python verify_dedup_copy.py SOURCE DEST --log dedup_log.json
 """
 
 import argparse
 import hashlib
 import json
 import os
-import random
 import sys
 
 
@@ -48,12 +48,7 @@ def main():
     parser.add_argument("source", help="Original source directory")
     parser.add_argument("destination", help="Copy destination directory")
     parser.add_argument("--log", required=True, help="Path to dedup_log.json")
-    parser.add_argument(
-        "--spot-check",
-        type=int,
-        default=10,
-        help="Number of random files to SHA-256 verify (default: 10)",
-    )
+    parser.add_argument("--spot-check", type=int, help=argparse.SUPPRESS)  # ignored: every file is hashed
     args = parser.parse_args()
 
     source = os.path.abspath(args.source)
@@ -138,27 +133,24 @@ def main():
 
     results["keepers_present"] = "PASS" if not missing_keepers else "FAIL"
 
-    # ---- Check 4: SHA-256 spot-check ----
-    print(f"\n[Check 4] SHA-256 spot-check ({args.spot_check} files)")
-    target_rels = list(target_files.keys())
-    sample_size = min(args.spot_check, len(target_rels))
-    sample = random.sample(target_rels, sample_size)
-
+    # ---- Check 4: SHA-256 of every target file and every skipped duplicate ----
+    print("\n[Check 4] SHA-256 of every target file and every skipped duplicate")
     mismatches = []
-    for rel in sample:
+    for rel, dst_path in sorted(target_files.items()):
         src_path = os.path.join(source, rel)
-        dst_path = target_files[rel]
-        if not os.path.exists(src_path):
-            # File might not exist at same relative path in source if it was
-            # only present under a different relative path (unlikely but check)
-            print(f"  SKIP (no source match): {rel}")
-            continue
-        src_hash = sha256_file(src_path)
-        dst_hash = sha256_file(dst_path)
-        status = "OK" if src_hash == dst_hash else "MISMATCH"
-        if status == "MISMATCH":
-            mismatches.append(rel)
-        print(f"  {status}: {rel}")
+        if os.path.isfile(src_path) and sha256_file(src_path) != sha256_file(dst_path):
+            mismatches.append(f"target differs from source: {rel}")
+    for ds in dup_sets:
+        keeper = os.path.join(source, ds["kept"])
+        keeper_hash = sha256_file(keeper) if os.path.isfile(keeper) else None
+        for sk in ds["skipped"]:
+            member = os.path.join(source, sk["path"])
+            if keeper_hash is None or not os.path.isfile(member) or sha256_file(member) != keeper_hash:
+                mismatches.append(f"skipped file is not identical to its keeper {ds['kept']}: {sk['path']}")
+    for m in mismatches[:50]:
+        print(f"  MISMATCH: {m}")
+    if not mismatches:
+        print(f"  All {len(target_files)} target files and {len(skip_rel)} skipped duplicates verified.")
 
     results["content_integrity"] = "PASS" if not mismatches else "FAIL"
 
