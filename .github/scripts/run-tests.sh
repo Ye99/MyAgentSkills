@@ -3,7 +3,7 @@
 # modules in different skills never collide. Exits non-zero if any suite fails.
 # Usage: .github/scripts/run-tests.sh [pytest args...]
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 1
 
 mapfile -t dirs < <(
   find . -path ./.git -prune -o -path '*/node_modules' -prune -o -path '*/.venv*' -prune -o \
