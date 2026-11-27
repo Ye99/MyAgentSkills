@@ -44,7 +44,7 @@ class RenameFolderByAiItineraryTests(unittest.TestCase):
         self._start_server_patch.stop()
 
     @staticmethod
-    def _fake_start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> mod.OpencodeServerHandle:
+    def _fake_start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0, cancel=None) -> mod.OpencodeServerHandle:
         _ = startup_timeout_sec
         port = 4100 + worker_id
         return mod.OpencodeServerHandle(

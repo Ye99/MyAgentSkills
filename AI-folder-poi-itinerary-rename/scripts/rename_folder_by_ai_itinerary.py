@@ -975,7 +975,11 @@ def _append_worker_log(logs: list[dict[str, Any]], entry: dict[str, Any], max_en
     logs.append(entry)
 
 
-def start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> OpencodeServerHandle:
+def start_opencode_server(
+    worker_id: int,
+    startup_timeout_sec: float = 30.0,
+    cancel: threading.Event | None = None,
+) -> OpencodeServerHandle:
     port = _find_free_local_port()
     process = subprocess.Popen(
         ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
@@ -989,6 +993,8 @@ def start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> 
     handle = OpencodeServerHandle(worker_id=worker_id, port=port, url=url, process=process)
     try:
         while time.time() < deadline:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError(f"worker-{worker_id} opencode serve start cancelled")
             if process.poll() is not None:
                 raise RuntimeError(f"worker-{worker_id} opencode serve exited early code={process.returncode}")
             try:
@@ -996,7 +1002,10 @@ def start_opencode_server(worker_id: int, startup_timeout_sec: float = 30.0) -> 
                     if response.status == 200:
                         return handle
             except Exception:
-                time.sleep(0.2)
+                if cancel is not None:
+                    cancel.wait(0.2)
+                else:
+                    time.sleep(0.2)
         raise RuntimeError(f"worker-{worker_id} timed out waiting for opencode serve health")
     except BaseException:
         # Includes Ctrl-C while waiting: never leave the server running.
@@ -1016,11 +1025,15 @@ def stop_opencode_server(handle: OpencodeServerHandle) -> None:
         handle.process.kill()
 
 
-def start_opencode_server_pool(worker_count: int) -> list[OpencodeServerHandle]:
+def start_opencode_server_pool(
+    worker_count: int, cancel: threading.Event | None = None
+) -> list[OpencodeServerHandle]:
     servers: list[OpencodeServerHandle] = []
     for worker_id in range(max(1, worker_count)):
         try:
-            servers.append(start_opencode_server(worker_id=worker_id))
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("opencode server pool start cancelled")
+            servers.append(start_opencode_server(worker_id=worker_id, cancel=cancel))
         except BaseException:
             for started in servers:
                 stop_opencode_server(started)
@@ -1061,7 +1074,10 @@ class SharedInferenceScheduler:
 
     With ``server_factory`` the servers start on the first ``submit`` (so a run
     that needs no inference starts none) and are stopped by ``shutdown``. A
-    failed start fails every request at once and is not retried.
+    failed start fails every request at once and is not retried. The factory
+    gets a cancel event and runs outside the scheduler lock, so ``shutdown``
+    never waits for a slow start: it sets the event, and servers that finish
+    starting after it are stopped at once.
     """
 
     def __init__(
@@ -1072,7 +1088,7 @@ class SharedInferenceScheduler:
         opencode_retries: int,
         opencode_backoff_sec: float,
         opencode_model: str | None,
-        server_factory: Callable[[], list[OpencodeServerHandle]] | None = None,
+        server_factory: Callable[[threading.Event], list[OpencodeServerHandle]] | None = None,
     ) -> None:
         self._servers = list(servers or [])
         self._server_factory = server_factory
@@ -1095,6 +1111,9 @@ class SharedInferenceScheduler:
         }
         self._threads: list[threading.Thread] = []
         self._started = False
+        self._starting = False
+        self._start_done = threading.Event()
+        self._start_cancel = threading.Event()
         if server_factory is None:
             self._start_threads()
 
@@ -1105,26 +1124,57 @@ class SharedInferenceScheduler:
             thread.start()
             self._threads.append(thread)
 
-    def _ensure_started_locked(self) -> None:
-        if self._started or self._start_error is not None:
-            return
+    def _run_start(self) -> None:
+        """Start the pool outside the lock, so ``shutdown`` is never blocked by it."""
         assert self._server_factory is not None
+        servers: list[OpencodeServerHandle] = []
+        error: Exception | None = RuntimeError("server pool start interrupted")
+        stop_now = False
         try:
-            self._servers = list(self._server_factory())
-        except Exception as exc:  # noqa: BLE001
-            self._start_error = exc
-            return
-        self._start_threads()
+            try:
+                servers = list(self._server_factory(self._start_cancel))
+                error = None
+            except Exception as exc:  # noqa: BLE001
+                error = exc
+        finally:
+            with self._lock:
+                self._starting = False
+                if self._closed:
+                    stop_now = True
+                    self._start_error = error or RuntimeError("scheduler closed while servers were starting")
+                elif error is not None:
+                    self._start_error = error
+                else:
+                    self._servers = servers
+                    self._start_threads()
+            self._start_done.set()
+            if stop_now and servers:
+                stop_opencode_server_pool(servers)
 
     def submit(self, key: tuple[float, float], cluster: LocationCluster) -> Future[SchedulerTaskResult]:
         task_key = (key[0], key[1], self._model or "")
+        closed_error = "scheduler closed"
         with self._lock:
             self._metrics["submit_total"] += 1
+            run_start = (
+                not self._closed
+                and self._server_factory is not None
+                and not self._started
+                and not self._starting
+                and self._start_error is None
+            )
+            if run_start:
+                self._starting = True
+            wait_start = self._starting and not run_start
+        if run_start:
+            self._run_start()
+        elif wait_start:
+            self._start_done.wait()
+        with self._lock:
             if self._closed:
                 future: Future[SchedulerTaskResult] = Future()
-                future.set_exception(InferenceExhaustedError("scheduler closed", attempt_count=0))
+                future.set_exception(InferenceExhaustedError(closed_error, attempt_count=0))
                 return future
-            self._ensure_started_locked()
             if self._start_error is not None:
                 future = Future()
                 future.set_exception(
@@ -1232,18 +1282,21 @@ class SharedInferenceScheduler:
             if self._closed:
                 return
             self._closed = True
+            self._start_cancel.set()  # a start still running gives up; its servers are stopped
             if cancel_pending:
                 for future in self._futures.values():
                     if not future.done():
                         future.set_exception(
                             InferenceExhaustedError("processing cancelled by user", attempt_count=0)
                         )
-        for _ in self._threads:
+            threads = list(self._threads)
+            servers = list(self._servers)
+        for _ in threads:
             self._queue.put(None)
-        for thread in self._threads:
+        for thread in threads:
             thread.join(timeout=5)
         if self._owns_servers:
-            stop_opencode_server_pool(self._servers)
+            stop_opencode_server_pool(servers)
 
 
 def infer_pending_cluster_infos(
@@ -1896,7 +1949,7 @@ def process_folder_tree(
         # resumed or media-less tree starts none.
         inference_scheduler = SharedInferenceScheduler(
             None,
-            server_factory=lambda: start_opencode_server_pool(inference_workers),
+            server_factory=lambda cancel: start_opencode_server_pool(inference_workers, cancel=cancel),
             opencode_timeout_sec=opencode_timeout_sec,
             opencode_retries=opencode_retries,
             opencode_backoff_sec=opencode_backoff_sec,

@@ -16,7 +16,7 @@ def _run(folder: Path, points, **kwargs) -> int:
 
     defaults = dict(apply=False, ratio=1.0, inference_workers=1, home_gps=(10.0, 10.0))
     defaults.update(kwargs)
-    def fake_server(worker_id, startup_timeout_sec=30.0):
+    def fake_server(worker_id, startup_timeout_sec=30.0, cancel=None):
         return mod.OpencodeServerHandle(worker_id=worker_id, port=1, url="http://127.0.0.1:1", process=None)
 
     with patch.object(mod, "extract_media_points", return_value=(points, [])), \

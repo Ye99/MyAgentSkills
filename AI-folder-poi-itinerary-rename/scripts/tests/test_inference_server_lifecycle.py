@@ -92,3 +92,59 @@ def test_opencode_availability_is_not_cached_across_tests_a():
 def test_opencode_availability_is_not_cached_across_tests_b():
     with patch.object(mod.shutil, "which", return_value="/usr/bin/opencode"):
         assert mod.has_opencode_command() is True
+
+
+def test_shutdown_does_not_wait_for_a_slow_server_start_and_cancels_it():
+    import threading
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    seen: dict[str, Any] = {}
+    servers = [_handle(0)]
+
+    def slow_factory(cancel=None):
+        seen["cancel"] = cancel
+        entered.set()
+        release.wait(5)  # an unresponsive server still starting
+        return servers
+
+    scheduler = _scheduler(slow_factory)
+    box: dict[str, Any] = {}
+    submitter = threading.Thread(target=lambda: box.setdefault("f", scheduler.submit((1.0, 1.0), _cluster())))
+    with patch.object(mod, "stop_opencode_server") as stop:
+        submitter.start()
+        assert entered.wait(5)
+        t0 = time.monotonic()
+        scheduler.shutdown(cancel_pending=True)
+        assert time.monotonic() - t0 < 1.0
+        assert seen["cancel"] is not None and seen["cancel"].is_set()
+        release.set()
+        submitter.join(5)
+        with pytest.raises(mod.InferenceExhaustedError):
+            box["f"].result(timeout=5)
+        assert stop.call_count == 1  # servers that finished starting after shutdown are stopped
+
+
+def test_server_start_gives_up_when_cancelled():
+    import threading
+
+    from conftest import REAL_START_OPENCODE_SERVER
+
+    cancel = threading.Event()
+    proc = MagicMock()
+    proc.poll.return_value = None
+
+    def not_up_and_cancelled(*_a, **_k):
+        cancel.set()  # shutdown arrives while the first server is still starting
+        raise OSError("not up")
+
+    with patch.object(mod.subprocess, "Popen", return_value=proc) as popen, \
+         patch.object(mod, "_find_free_local_port", return_value=4999), \
+         patch.object(mod.urllib.request, "urlopen", side_effect=not_up_and_cancelled), \
+         patch.object(mod, "start_opencode_server", REAL_START_OPENCODE_SERVER), \
+         patch.object(mod, "stop_opencode_server") as stop:
+        with pytest.raises(RuntimeError, match="cancelled"):
+            mod.start_opencode_server_pool(2, cancel=cancel)
+    assert popen.call_count == 1  # the second server is never started
+    assert stop.call_count == 1  # the one that was starting is stopped
