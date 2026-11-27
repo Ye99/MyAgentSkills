@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -245,9 +246,16 @@ def main():
                     continue
                 raise FileExistsError("a different file is already at the destination; not overwritten")
             os.makedirs(dest_dir, exist_ok=True)
-            part = os.path.join(dest_dir, f".{os.path.basename(dest)}.dedup-copy-part")
-            shutil.copy2(fpath, part)
-            os.replace(part, dest)
+            # A fresh, exclusively created temp name, so no existing file is overwritten.
+            fd, part = tempfile.mkstemp(dir=dest_dir, prefix=f".{os.path.basename(dest)}.", suffix=".dedup-copy-part")
+            os.close(fd)
+            try:
+                shutil.copy2(fpath, part)
+                os.replace(part, dest)
+            except BaseException:
+                if os.path.lexists(part):
+                    os.unlink(part)
+                raise
             copied_count += 1
             if copied_count % 500 == 0:
                 print(f"  Copied {copied_count}/{len(copy_list)}...")

@@ -118,3 +118,23 @@ def test_keeper_is_never_an_excluded_file(tree):
     assert r.returncode == 0, r.stdout + r.stderr
     assert (dest / "sub" / "a (1).jpg").read_bytes() == b"photo"
     assert verify(src, dest, log).returncode == 0
+
+
+def test_a_source_file_named_like_a_temp_file_is_not_overwritten(tree):
+    src, dest, jd, log = tree
+    (src / ".b.jpg.dedup-copy-part").write_bytes(b"a real file with an odd name")
+    r = copy(src, dest, jd, log)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (dest / ".b.jpg.dedup-copy-part").read_bytes() == b"a real file with an odd name"
+    assert (dest / "b.jpg").read_bytes() == b"other"
+    assert verify(src, dest, log).returncode == 0
+
+
+def test_resume_leaves_an_existing_destination_file_with_a_temp_like_name(tree):
+    src, dest, jd, log = tree
+    dest.mkdir()
+    (dest / ".b.jpg.dedup-copy-part").write_bytes(b"someone else's file")
+    r = copy(src, dest, jd, log, "--resume")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (dest / ".b.jpg.dedup-copy-part").read_bytes() == b"someone else's file"
+    assert (dest / "b.jpg").read_bytes() == b"other"
